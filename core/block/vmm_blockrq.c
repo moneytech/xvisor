@@ -49,6 +49,29 @@ struct blockrq_work {
 	bool is_free;
 };
 
+static int blockrq_cache_rw(struct vmm_blockrq *brq,
+			    struct vmm_request *r)
+{
+	int rc = VMM_ENOTAVAIL;
+
+	switch (r->type) {
+	case VMM_REQUEST_READ:
+		if (brq->ops->read_cache) {
+			rc = brq->ops->read_cache(brq, r, brq->priv);
+		}
+		break;
+	case VMM_REQUEST_WRITE:
+		if (brq->ops->write_cache) {
+			rc = brq->ops->write_cache(brq, r, brq->priv);
+		}
+		break;
+	default:
+		break;
+	};
+
+	return rc;
+}
+
 static int blockrq_queue_rw(struct vmm_blockrq *brq,
 			    struct vmm_request *r)
 {
@@ -162,8 +185,8 @@ static int blockrq_abort_rw(struct vmm_blockrq *brq,
 		blockrq_dequeue_work(bwork);
 	}
 
-	if (brq->abort) {
-		rc = brq->abort(brq, r, brq->priv);
+	if (brq->ops->abort) {
+		rc = brq->ops->abort(brq, r, brq->priv);
 	}
 
 	return rc;
@@ -210,15 +233,15 @@ static void blockrq_work_func(struct vmm_work *work)
 
 	switch (bwork->d.rw.r->type) {
 	case VMM_REQUEST_READ:
-		if (brq->read) {
-			rc = brq->read(brq, bwork->d.rw.r, brq->priv);
+		if (brq->ops->read) {
+			rc = brq->ops->read(brq, bwork->d.rw.r, brq->priv);
 		} else {
 			rc = VMM_EIO;
 		}
 		break;
 	case VMM_REQUEST_WRITE:
-		if (brq->write) {
-			rc = brq->write(brq, bwork->d.rw.r, brq->priv);
+		if (brq->ops->write) {
+			rc = brq->ops->write(brq, bwork->d.rw.r, brq->priv);
 		} else {
 			rc = VMM_EIO;
 		}
@@ -234,18 +257,24 @@ static void blockrq_work_func(struct vmm_work *work)
 
 static void blockrq_flush_work(struct vmm_blockrq *brq, void *priv)
 {
-	if (brq->flush) {
-		brq->flush(brq, brq->priv);
+	if (brq->ops->flush) {
+		brq->ops->flush(brq, brq->priv);
 	}
 }
 
-static int blockrq_make_request(struct vmm_request_queue *rq, 
+static int blockrq_peek_cache(struct vmm_request_queue *rq,
+			      struct vmm_request *r)
+{
+	return blockrq_cache_rw(vmm_blockrq_from_rq(rq), r);
+}
+
+static int blockrq_make_request(struct vmm_request_queue *rq,
 				struct vmm_request *r)
 {
 	return blockrq_queue_rw(vmm_blockrq_from_rq(rq), r);
 }
 
-static int blockrq_abort_request(struct vmm_request_queue *rq, 
+static int blockrq_abort_request(struct vmm_request_queue *rq,
 				 struct vmm_request *r)
 {
 	return blockrq_abort_rw(vmm_blockrq_from_rq(rq), r);
@@ -307,17 +336,13 @@ VMM_EXPORT_SYMBOL(vmm_blockrq_destroy);
 
 struct vmm_blockrq *vmm_blockrq_create(
 	const char *name, u32 max_pending, bool async_rw,
-	int (*read)(struct vmm_blockrq *,struct vmm_request *, void *),
-	int (*write)(struct vmm_blockrq *,struct vmm_request *, void *),
-	int (*abort)(struct vmm_blockrq *,struct vmm_request *, void *),
-	void (*flush)(struct vmm_blockrq *,void *),
-	void *priv)
+	const struct vmm_blockrq_ops *ops, void *priv)
 {
 	u32 i;
 	struct vmm_blockrq *brq;
 	struct blockrq_work *bwork;
 
-	if (!name || !max_pending) {
+	if (!name || !max_pending || !ops) {
 		goto fail;
 	}
 
@@ -332,10 +357,7 @@ struct vmm_blockrq *vmm_blockrq_create(
 	}
 	brq->max_pending = max_pending;
 	brq->async_rw = async_rw;
-	brq->read = read;
-	brq->write = write;
-	brq->abort = abort;
-	brq->flush = flush;
+	brq->ops = ops;
 	brq->priv = priv;
 
 	brq->wq_page_count =
@@ -380,6 +402,7 @@ struct vmm_blockrq *vmm_blockrq_create(
 
 	INIT_REQUEST_QUEUE(&brq->rq,
 			   max_pending,
+			   blockrq_peek_cache,
 			   blockrq_make_request,
 			   blockrq_abort_request,
 			   blockrq_flush_cache,

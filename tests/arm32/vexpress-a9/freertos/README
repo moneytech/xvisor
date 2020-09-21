@@ -52,20 +52,13 @@ have been successfully tested.
      | cd $xvisor_src
      `----
 
-  3. Initialize Xvisor submodules
-
-     ,----
-     | git submodule init
-     | git submodule update
-     `----
-
-  4. Configure Xvisor with Generic v7 default settings:
+  3. Configure Xvisor with Generic v7 default settings:
 
      ,----
      | make ARCH=arm generic-v7-defconfig
      `----
 
-  5. Build Xvisor and DTBs:
+  4. Build Xvisor and DTBs:
 
      ,----
      | make
@@ -124,18 +117,18 @@ have been successfully tested.
 
      ,----
      | cd $xvisor_src
-     | dtc=./build/tools/dtc/bin/dtc
+     | dtc=dtc
      | bindir=./build/disk/images/arm32/vexpress-a9
      | system_dir=./build/disk/system
      | img_dir=./build/disk/images/arm32
      | srcdir=./tests/arm32/vexpress-a9
-     | 
+     |
      | mkdir -p $system_dir
      | mkdir -p $bindir
-     | 
+     |
      | cp -f ./docs/banner/roman.txt $system_dir/banner.txt
      | cp -f ./docs/logo/xvisor_logo_name.ppm $system_dir/logo.ppm
-     | $dtc -I dts -O dtb -o $img_dir/vexpress-a9x2.dtb $srcdir/vexpress-a9x2.dts
+     | $dtc -q -I dts -O dtb -o $img_dir/vexpress-a9-guest.dtb $srcdir/vexpress-a9-guest.dts
      | cp -f ./build/$srcdir/freertos/freertos.patched.bin $bindir/freertos.bin
      | cp -f $srcdir/freertos/nor_flash.list $bindir/nor_flash.list
      | cp -f $srcdir/xscript/one_guest_vexpress-a9.xscript ./build/disk/boot.xscript

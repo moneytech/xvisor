@@ -6,12 +6,12 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2, or (at your option)
 # any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -27,11 +27,10 @@
 # testing for a specific architecture or later rather impossible.
 
 ifeq ($(CONFIG_64BIT),y)
-arch-cflags-y += -D__riscv -D__riscv_xlen=64
 arch-cflags-y += -mabi=lp64
 march-y = rv64im
 else
-arch-cflags-y += -D__riscv -D__riscv_xlen=32
+arch-ldflags-y += -static-libgcc -lgcc
 arch-cflags-y += -mabi=ilp32
 march-y = rv32im
 endif
@@ -47,10 +46,10 @@ arch-cflags-y += -fno-omit-frame-pointer -fno-optimize-sibling-calls
 arch-cflags-y += -mno-save-restore -mstrict-align
 
 ifeq ($(CONFIG_CMODEL_MEDLOW),y)
-	rch-cflags-y += -mcmodel=medlow
+	arch-cflags-y += -mcmodel=medlow
 endif
 ifeq ($(CONFIG_CMODEL_MEDANY),y)
-	rch-cflags-y += -mcmodel=medany
+	arch-cflags-y += -mcmodel=medany
 endif
 
 cpu-cppflags+=-DTEXT_START=0x10000000
@@ -62,6 +61,8 @@ cpu-ldflags += $(arch-ldflags-y)
 cpu-objs-y+= cpu_entry.o
 cpu-objs-y+= cpu_entry_helper.o
 cpu-objs-y+= cpu_proc.o
+cpu-objs-y+= cpu_tlb.o
+cpu-objs-y+= cpu_sbi.o
 cpu-objs-y+= cpu_init.o
 cpu-objs-y+= cpu_mmu_initial_pgtbl.o
 cpu-objs-y+= cpu_mmu.o
@@ -71,6 +72,13 @@ cpu-objs-$(CONFIG_RISCV_STACKTRACE)+= cpu_stacktrace.o
 cpu-objs-$(CONFIG_SMP)+= cpu_locks.o
 cpu-objs-y+= cpu_atomic.o
 cpu-objs-y+= cpu_atomic64.o
-cpu-objs-y+= cpu_interrupts.o
+cpu-objs-y+= cpu_exception.o
 cpu-objs-y+= cpu_vcpu_helper.o
+cpu-objs-y+= cpu_vcpu_csr.o
+cpu-objs-y+= cpu_vcpu_fp.o
 cpu-objs-y+= cpu_vcpu_irq.o
+cpu-objs-y+= cpu_vcpu_sbi.o
+cpu-objs-y+= cpu_vcpu_switch.o
+cpu-objs-y+= cpu_vcpu_timer.o
+cpu-objs-y+= cpu_vcpu_trap.o
+cpu-objs-y+= cpu_vcpu_unpriv.o

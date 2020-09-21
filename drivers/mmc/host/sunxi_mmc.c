@@ -304,7 +304,7 @@ static int sunxi_mmc_config_clock(struct sunxi_mmc_host *host, u32 div)
 	return VMM_OK;
 }
 
-static void sunxi_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
+static int sunxi_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	u32 clkdiv = 0;
 	struct sunxi_mmc_host* host = mmc_priv(mmc);
@@ -318,7 +318,7 @@ static void sunxi_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 				(ios->clock / 2));
 		if (sunxi_mmc_config_clock(host, clkdiv)) {
 			host->fatal_err = 1;
-			return;
+			return VMM_EIO;
 		}
 	}
 
@@ -330,6 +330,8 @@ static void sunxi_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	} else {
 		vmm_writel(0, &host->reg->width);
 	}
+
+	return 0;
 }
 
 static int sunxi_mmc_init_card(struct mmc_host *mmc, struct mmc_card *card)
@@ -784,22 +786,24 @@ static int sunxi_mmc_driver_probe(struct vmm_device *dev)
 		goto free_irq;
 	}
 
-	/* Add MMC host */
+	/* Print mmc host banner */
+	vmm_devtree_regaddr(dev->of_node, &basepa, 0);
+	vmm_linfo(dev->name, "Sunxi MMC at 0x%08llx irq %d (%s)\n",
+		  (unsigned long long)basepa, host->irq,
+#ifdef SUNXI_USE_DMA
+		  "dma");
+#else
+		  "pio");
+#endif
+
+	/* Add mmc host */
 	rc = mmc_add_host(mmc);
 	if (rc) {
+		vmm_lerror(dev->name, "MMC add host failed (error %d)\n", rc);
 		goto free_irq;
 	}
 
 	dev->priv = mmc;
-
-	vmm_devtree_regaddr(dev->of_node, &basepa, 0);
-	vmm_printf("%s: Sunxi MMC at 0x%08llx irq %d (%s)\n",
-		   dev->name, (unsigned long long)basepa, host->irq,
-#ifdef SUNXI_USE_DMA
-		   "dma");
-#else
-		   "pio");
-#endif
 
 	return VMM_OK;
 

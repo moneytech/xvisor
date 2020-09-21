@@ -68,6 +68,7 @@
 
 #define VMM_DEVTREE_CHOSEN_NODE_NAME		"chosen"
 #define VMM_DEVTREE_CONSOLE_ATTR_NAME		"console"
+#define VMM_DEVTREE_STDOUT_ATTR_NAME		"stdout-path"
 #define VMM_DEVTREE_RTCDEV_ATTR_NAME		"rtcdev"
 #define VMM_DEVTREE_BOOTARGS_ATTR_NAME		"bootargs"
 #define VMM_DEVTREE_BOOTCMD_ATTR_NAME		"bootcmd"
@@ -92,6 +93,7 @@
 
 #define VMM_DEVTREE_GUESTINFO_NODE_NAME		"guests"
 #define VMM_DEVTREE_VCPUS_NODE_NAME		"vcpus"
+#define VMM_DEVTREE_VCPU_TEMPLATE_NODE_NAME	"vcpu_template"
 #define VMM_DEVTREE_ENDIANNESS_ATTR_NAME	"endianness"
 #define VMM_DEVTREE_ENDIANNESS_VAL_BIG		"big"
 #define VMM_DEVTREE_ENDIANNESS_VAL_LITTLE	"little"

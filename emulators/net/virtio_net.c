@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -57,6 +57,7 @@ struct virtio_net_queue {
 	int num;
 	int valid;
 	int type;
+	struct vmm_netport_lazy lazy;
 	struct vmm_virtio_queue vq;
 	struct vmm_virtio_iovec iov[VIRTIO_NET_QUEUE_SIZE];
 	struct virtio_net_dev *ndev;
@@ -70,14 +71,14 @@ struct virtio_net_dev {
 	u32 max_queues;
 	u32 can_receive;
 	struct vmm_virtio_net_config config;
-	u32 features;
+	u64 features;
 
 	int mode;
 	struct vmm_netport *port;
 	char name[VMM_VIRTIO_DEVICE_MAX_NAME_LEN];
 };
 
-static u32 virtio_net_get_host_features(struct vmm_virtio_device *dev)
+static u64 virtio_net_get_host_features(struct vmm_virtio_device *dev)
 {
 	return 1UL << VMM_VIRTIO_NET_F_MAC
 #if 0
@@ -99,11 +100,15 @@ static u32 virtio_net_get_host_features(struct vmm_virtio_device *dev)
 }
 
 static void virtio_net_set_guest_features(struct vmm_virtio_device *dev,
-					  u32 features)
+					  u32 select, u32 features)
 {
 	struct virtio_net_dev *ndev = dev->emu_data;
 
-	ndev->features = features;
+	if (1 < select)
+		return;
+
+	ndev->features &= ~((u64)UINT_MAX << (select * 32));
+	ndev->features |= ((u64)features << (select * 32));
 }
 
 static int virtio_net_init_vq(struct vmm_virtio_device *dev,
@@ -176,7 +181,7 @@ static void virtio_net_tx_lazy(struct vmm_netport *port, void *arg, int budget)
 		if (pkt_len <= VIRTIO_NET_MTU) {
 			MGETHDR(mb, 0, 0);
 			MEXTMALLOC(mb, pkt_len, 0);
-			vmm_virtio_iovec_to_buf_read(dev, 
+			vmm_virtio_iovec_to_buf_read(dev,
 						 &iov[1], iov_cnt - 1,
 						 M_BUFADDR(mb), pkt_len);
 			mb->m_len = mb->m_pktlen = pkt_len;
@@ -200,8 +205,7 @@ static void virtio_net_tx_poke(struct virtio_net_dev *ndev, u32 vq)
 	struct virtio_net_queue *q = &ndev->vqs[vq];
 
 	if (vmm_virtio_queue_available(&q->vq)) {
-		vmm_port2switch_xfer_lazy(ndev->port, virtio_net_tx_lazy, 
-					  q, VIRTIO_NET_TX_LAZY_BUDGET);
+		vmm_port2switch_xfer_lazy(&q->lazy);
 	}
 }
 
@@ -386,7 +390,7 @@ static int virtio_net_switch2port_xfer(struct vmm_netport *p,
 	return VMM_OK;
 }
 
-static int virtio_net_read_config(struct vmm_virtio_device *dev, 
+static int virtio_net_read_config(struct vmm_virtio_device *dev,
 				  u32 offset, void *dst, u32 dst_len)
 {
 	struct virtio_net_dev *ndev = dev->emu_data;
@@ -433,7 +437,7 @@ static int virtio_net_reset(struct vmm_virtio_device *dev)
 	return VMM_OK;
 }
 
-static int virtio_net_connect(struct vmm_virtio_device *dev, 
+static int virtio_net_connect(struct vmm_virtio_device *dev,
 			      struct vmm_virtio_emulator *emu)
 {
 	int i, rc;
@@ -485,6 +489,11 @@ static int virtio_net_connect(struct vmm_virtio_device *dev,
 			ndev->vqs[i].type = VIRTIO_NET_CTRL_QUEUE;
 		} else {
 			if (i % 2) {
+				INIT_NETPORT_LAZY(&ndev->vqs[i].lazy,
+						  ndev->port,
+						  VIRTIO_NET_TX_LAZY_BUDGET,
+						  &ndev->vqs[i],
+						  virtio_net_tx_lazy);
 				ndev->vqs[i].type = VIRTIO_NET_TX_QUEUE;
 			} else {
 				ndev->vqs[i].type = VIRTIO_NET_RX_QUEUE;

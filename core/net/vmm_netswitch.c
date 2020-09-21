@@ -129,9 +129,10 @@ if (ether_type(mtod(mbuf, u8 *)) == 0x0806	/* ARP */) {		\
 
 struct vmm_netswitch_bh_ctrl {
 	struct vmm_thread *thread;
-	struct vmm_completion xfer_cmpl;
-	vmm_spinlock_t xfer_list_lock;
-	struct dlist xfer_list;
+	struct vmm_completion bh_cmpl;
+	vmm_spinlock_t bh_list_lock;
+	struct dlist mbuf_list;
+	struct dlist lazy_list;
 };
 
 static DEFINE_PER_CPU(struct vmm_netswitch_bh_ctrl, nbctrl);
@@ -141,134 +142,166 @@ static LIST_HEAD(policy_list);
 
 static void __init netswitch_bh_init(struct vmm_netswitch_bh_ctrl *nbp)
 {
-	INIT_COMPLETION(&nbp->xfer_cmpl);
-	INIT_SPIN_LOCK(&nbp->xfer_list_lock);
-	INIT_LIST_HEAD(&nbp->xfer_list);
+	INIT_COMPLETION(&nbp->bh_cmpl);
+	INIT_SPIN_LOCK(&nbp->bh_list_lock);
+	INIT_LIST_HEAD(&nbp->mbuf_list);
+	INIT_LIST_HEAD(&nbp->lazy_list);
 }
 
 static int netswitch_bh_enqueue(struct vmm_netswitch_bh_ctrl *nbp,
-				     struct vmm_netport_xfer *xfer)
+				struct vmm_mbuf *mbuf,
+				struct vmm_netport_lazy *lazy)
 {
 	irq_flags_t flags;
 
-	vmm_spin_lock_irqsave_lite(&nbp->xfer_list_lock, flags);
-	list_add_tail(&xfer->head, &nbp->xfer_list);
-	vmm_spin_unlock_irqrestore_lite(&nbp->xfer_list_lock, flags);
+	if (!nbp || (!mbuf && !lazy)) {
+		return VMM_EINVALID;
+	}
 
-	vmm_completion_complete_once(&nbp->xfer_cmpl);
+	vmm_spin_lock_irqsave_lite(&nbp->bh_list_lock, flags);
+	if (mbuf) {
+		list_add_tail(&mbuf->m_list, &nbp->mbuf_list);
+	}
+	if (lazy) {
+		list_add_tail(&lazy->head, &nbp->lazy_list);
+	}
+	vmm_spin_unlock_irqrestore_lite(&nbp->bh_list_lock, flags);
+
+	vmm_completion_complete_once(&nbp->bh_cmpl);
 
 	return VMM_OK;
 }
 
-static struct vmm_netport_xfer *netswitch_bh_dequeue(
-				struct vmm_netswitch_bh_ctrl *nbp)
+static int netswitch_bh_dequeue(struct vmm_netswitch_bh_ctrl *nbp,
+				struct vmm_mbuf **mbufp,
+				struct vmm_netport_lazy **lazyp)
 {
 	irq_flags_t flags;
-	struct vmm_netport_xfer *xfer;
 
-	vmm_spin_lock_irqsave_lite(&nbp->xfer_list_lock, flags);
-
-	while (list_empty(&nbp->xfer_list)) {
-		vmm_spin_unlock_irqrestore_lite(&nbp->xfer_list_lock, flags);
-		vmm_completion_wait(&nbp->xfer_cmpl);
-		vmm_spin_lock_irqsave_lite(&nbp->xfer_list_lock, flags);
+	if (!nbp || !mbufp || !lazyp) {
+		return VMM_EINVALID;
 	}
 
-	xfer = list_entry(list_pop(&nbp->xfer_list),
-			  struct vmm_netport_xfer, head);
+	vmm_spin_lock_irqsave_lite(&nbp->bh_list_lock, flags);
 
-	vmm_spin_unlock_irqrestore_lite(&nbp->xfer_list_lock, flags);
+	while (list_empty(&nbp->mbuf_list) && list_empty(&nbp->lazy_list)) {
+		vmm_spin_unlock_irqrestore_lite(&nbp->bh_list_lock, flags);
+		vmm_completion_wait(&nbp->bh_cmpl);
+		vmm_spin_lock_irqsave_lite(&nbp->bh_list_lock, flags);
+	}
 
-	return xfer;
+	if (!list_empty(&nbp->mbuf_list)) {
+		*mbufp = list_entry(list_pop(&nbp->mbuf_list),
+				    struct vmm_mbuf, m_list);
+	}
+
+	if (!list_empty(&nbp->lazy_list)) {
+		*lazyp = list_entry(list_pop(&nbp->lazy_list),
+				    struct vmm_netport_lazy, head);
+	}
+
+	vmm_spin_unlock_irqrestore_lite(&nbp->bh_list_lock, flags);
+
+	return VMM_OK;
 }
 
 static void netswitch_bh_port_flush(struct vmm_netswitch_bh_ctrl *nbp,
 					 struct vmm_netport *port)
 {
 	irq_flags_t flags;
-	struct vmm_netport_xfer *xfer, *nxfer;
+	struct vmm_mbuf *mbuf, *nmbuf;
+	struct vmm_netport_lazy *lazy, *nlazy;
 
-	vmm_spin_lock_irqsave_lite(&nbp->xfer_list_lock, flags);
+	vmm_spin_lock_irqsave_lite(&nbp->bh_list_lock, flags);
 
-	list_for_each_entry_safe(xfer, nxfer, &nbp->xfer_list, head) {
-		if (xfer->port == port) {
-			list_del(&xfer->head);
-			if (xfer->mbuf) {
-				m_freem(xfer->mbuf);
-			}
-			vmm_netport_free_xfer(xfer->port, xfer);
+	list_for_each_entry_safe(mbuf, nmbuf, &nbp->mbuf_list, m_list) {
+		if (mbuf->m_list_priv == port) {
+			list_del(&mbuf->m_list);
+			mbuf->m_list_priv = NULL;
+			m_freem(mbuf);
 		}
 	}
 
-	vmm_spin_unlock_irqrestore_lite(&nbp->xfer_list_lock, flags);
+	list_for_each_entry_safe(lazy, nlazy, &nbp->lazy_list, head) {
+		if (lazy->port == port) {
+			list_del(&lazy->head);
+		}
+	}
+
+	vmm_spin_unlock_irqrestore_lite(&nbp->bh_list_lock, flags);
 }
 
 static int netswitch_bh_main(void *param)
 {
-	struct vmm_netport *xfer_port;
-	struct vmm_netswitch *xfer_nsw;
-	enum vmm_netport_xfer_type xfer_type;
-	struct vmm_mbuf *xfer_mbuf;
-	int xfer_lazy_budget;
-	void *xfer_lazy_arg;
-	void (*xfer_lazy_xfer)(struct vmm_netport *, void *, int);
-	struct vmm_netport_xfer *xfer;
+	int rc;
+	struct vmm_netport *port;
+	struct vmm_netswitch *nsw;
+	struct vmm_mbuf *mbuf;
+	struct vmm_netport_lazy *lazy;
 	struct vmm_netswitch_bh_ctrl *nbp = param;
 
 	while (1) {
-		/* Try to get xfer request from xfer ring */
-		xfer = netswitch_bh_dequeue(nbp);
-		if (!xfer) {
+		/* Try to get next request from list or block if empty */
+		lazy = NULL;
+		mbuf = NULL;
+		rc = netswitch_bh_dequeue(nbp, &mbuf, &lazy);
+		if (rc) {
 			continue;
 		}
 
-		/* Extract info from xfer request */
-		xfer_port = xfer->port;
-		xfer_nsw = xfer->port->nsw;
-		xfer_type = xfer->type;
-		xfer_mbuf = xfer->mbuf;
-		xfer_lazy_budget = xfer->lazy_budget;
-		xfer_lazy_arg = xfer->lazy_arg;
-		xfer_lazy_xfer = xfer->lazy_xfer;
+		/* Process mbuf request */
+		if (mbuf) {
+			/* Extract port from mbuf */
+			port = mbuf->m_list_priv;
+			nsw = port->nsw;
+			mbuf->m_list_priv = NULL;
 
-		/* Free netport xfer request */
-		vmm_netport_free_xfer(xfer->port, xfer);
-
-		/* Port might have been removed from netswitch */
-		if (!xfer_port || !xfer_nsw) {
-			if (xfer_mbuf) {
-				m_freem(xfer_mbuf);
+			/* Port might have been removed from netswitch */
+			if (!port || !nsw) {
+				if (mbuf) {
+					m_freem(mbuf);
+				}
+				continue;
 			}
-			continue;
-		}
 
-		/* Print debug info */
-		DPRINTF("%s: nsw=%s xfer_type=%d\n", __func__,
-			xfer_nsw->name, xfer_type);
+			/* Print debug info */
+			DPRINTF("%s: nsw=%s port=%s mbuf\n", __func__,
+				nsw->name, port->name);
 
-		/* Process xfer request */
-		switch (xfer_type) {
-		case VMM_NETPORT_XFER_LAZY:
-			/* Call lazy xfer function */
-			xfer_lazy_xfer(xfer_port,
-					xfer_lazy_arg,
-					xfer_lazy_budget);
-
-			break;
-		case VMM_NETPORT_XFER_MBUF:
 			/* Dump packet */
-			DUMP_NETSWITCH_PKT(xfer_mbuf);
+			DUMP_NETSWITCH_PKT(mbuf);
 
 			/* Call the rx function of net switch */
-			xfer_nsw->port2switch_xfer(xfer_nsw, xfer_port, xfer_mbuf);
+			nsw->port2switch_xfer(nsw, port, mbuf);
 
-			/* Free mbuf in xfer request */
-			m_freem(xfer_mbuf);
+			/* Free mbuf */
+			m_freem(mbuf);
+		}
 
-			break;
-		default:
-			break;
-		};
+		/* Process lazy request */
+		if (lazy) {
+			/* Extract info from lazy request */
+			port = lazy->port;
+			nsw = port->nsw;
+
+			/* Print debug info */
+			DPRINTF("%s: nsw=%s port=%s lazy\n", __func__,
+				nsw->name, port->name);
+
+			/* Call lazy xfer function */
+			lazy->xfer(port, lazy->arg, lazy->budget);
+
+			/* Add back to netswitch bh queue if required */
+			if (arch_atomic_sub_return(&lazy->sched_count, 1) > 0) {
+				/* Enqueue lazy request */
+				rc = netswitch_bh_enqueue(nbp, NULL, lazy);
+				if (rc) {
+					vmm_printf("%s: nsw=%s src=%s lazy bh "
+					   "enqueue failed.\n", __func__,
+					   nsw->name, port->name);
+				}
+			}
+		}
 	}
 
 	return VMM_OK;
@@ -277,7 +310,6 @@ static int netswitch_bh_main(void *param)
 int vmm_port2switch_xfer_mbuf(struct vmm_netport *src, struct vmm_mbuf *mbuf)
 {
 	int rc;
-	struct vmm_netport_xfer *xfer;
 	struct vmm_netswitch *nsw;
 	struct vmm_netswitch_bh_ctrl *nbp;
 
@@ -295,73 +327,50 @@ int vmm_port2switch_xfer_mbuf(struct vmm_netport *src, struct vmm_mbuf *mbuf)
 	/* Print debug info */
 	DPRINTF("%s: nsw=%s src=%s\n", __func__, nsw->name, src->name);
 
-	/* Alloc netport xfer request */
-	xfer = vmm_netport_alloc_xfer(src);
-	if (!xfer) {
-		vmm_printf("%s: nsw=%s src=%s xfer alloc failed.\n",
-			   __func__, nsw->name, src->name);
-		m_freem(mbuf);
-		return VMM_ENOMEM;
-	}
+	/* Save port in mbuf */
+	mbuf->m_list_priv = src;
 
-	/* Fill-up xfer request */
-	xfer->port = src;
-	xfer->type = VMM_NETPORT_XFER_MBUF;
-	xfer->mbuf = mbuf;
-
-	/* Add xfer request to xfer ring */
-	rc = netswitch_bh_enqueue(nbp, xfer);
+	/* Add mbuf bh queue */
+	rc = netswitch_bh_enqueue(nbp, mbuf, NULL);
 	if (rc) {
-		vmm_printf("%s: nsw=%s src=%s xfer bh enqueue failed.\n",
+		vmm_printf("%s: nsw=%s src=%s mbuf bh enqueue failed.\n",
 			   __func__, nsw->name, src->name);
-		vmm_netport_free_xfer(xfer->port, xfer);
+		mbuf->m_list_priv = NULL;
 	}
 
 	return rc;
 }
 VMM_EXPORT_SYMBOL(vmm_port2switch_xfer_mbuf);
 
-int vmm_port2switch_xfer_lazy(struct vmm_netport *src,
-			 void (*lazy_xfer)(struct vmm_netport *, void *, int),
-			 void *lazy_arg, int lazy_budget)
+int vmm_port2switch_xfer_lazy(struct vmm_netport_lazy *lazy)
 {
-	int rc;
-	struct vmm_netport_xfer *xfer;
-	struct vmm_netswitch *nsw;
-	struct vmm_netswitch_bh_ctrl *nbp;
+	int rc = VMM_EBUSY;
+	long sched_count;
 
-	if (!lazy_xfer || !src || !src->nsw) {
-		vmm_printf("%s: invalid source port or xfer callback.\n",
-			   __func__);
-		return VMM_EFAIL;
+	if (!lazy || !lazy->xfer || !lazy->port || !lazy->port->nsw) {
+		vmm_printf("%s: invalid lazy instance.\n", __func__);
+		return VMM_EINVALID;
 	}
-	nsw = src->nsw;
-	nbp = &this_cpu(nbctrl);
 
 	/* Print debug info */
-	DPRINTF("%s: nsw=%s src=%s\n", __func__, nsw->name, src->name);
+	DPRINTF("%s: nsw=%s port=%s xfer lazy\n",
+		__func__, lazy->port->nsw->name, lazy->port->name);
 
-	/* Alloc netport xfer request */
-	xfer = vmm_netport_alloc_xfer(src);
-	if (!xfer) {
-		vmm_printf("%s: nsw=%s src=%s xfer alloc failed.\n",
-			   __func__, nsw->name, src->name);
-		return VMM_ENOMEM;
-	}
+	sched_count = arch_atomic_add_return(&lazy->sched_count, 1);
+	if (sched_count == 1) {
+		/* Print debug info */
+		DPRINTF("%s: nsw=%s port=%s bh enqueue\n",
+			__func__, lazy->port->nsw->name, lazy->port->name);
 
-	/* Fill-up xfer request */
-	xfer->port = src;
-	xfer->type = VMM_NETPORT_XFER_LAZY;
-	xfer->lazy_arg = lazy_arg;
-	xfer->lazy_budget = lazy_budget;
-	xfer->lazy_xfer = lazy_xfer;
-
-	/* Add xfer request to xfer ring */
-	rc = netswitch_bh_enqueue(nbp, xfer);
-	if (rc) {
-		vmm_printf("%s: nsw=%s src=%s xfer bh enqueue failed.\n",
-			   __func__, nsw->name, src->name);
-		vmm_netport_free_xfer(xfer->port, xfer);
+		/* Add xfer request to xfer ring */
+		rc = netswitch_bh_enqueue(&this_cpu(nbctrl), NULL, lazy);
+		if (rc) {
+			vmm_printf("%s: nsw=%s port=%s lazy bh "
+				   "enqueue failed.\n", __func__,
+				   lazy->port->nsw->name, lazy->port->name);
+		} else {
+			rc = VMM_OK;
+		}
 	}
 
 	return rc;

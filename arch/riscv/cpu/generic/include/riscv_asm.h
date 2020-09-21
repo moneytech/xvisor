@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -37,12 +37,20 @@
 #define __ASM_STR(x)	#x
 #endif
 
-#if __riscv_xlen == 64
-#define __REG_SEL(a, b)	__ASM_STR(a)
-#elif __riscv_xlen == 32
-#define __REG_SEL(a, b)	__ASM_STR(b)
+#ifdef CONFIG_64BIT
+#if __riscv_xlen != 64
+#error "Need 64bit toolchain for 64bit system"
+#endif
 #else
-#error "Unexpected __riscv_xlen"
+#if __riscv_xlen != 32
+#error "Need 32bit toolchain for 32bit system"
+#endif
+#endif
+
+#ifdef CONFIG_64BIT
+#define __REG_SEL(a, b)	__ASM_STR(a)
+#else
+#define __REG_SEL(a, b)	__ASM_STR(b)
 #endif
 
 #define REG_L		__REG_SEL(ld, lw)
@@ -130,8 +138,9 @@
 #define RISCV_ARCH_REGS_t6		31
 #define RISCV_ARCH_REGS_sepc		32
 #define RISCV_ARCH_REGS_sstatus		33
-#define RISCV_ARCH_REGS_sp_exec		34
-#define RISCV_ARCH_REGS_last		35
+#define RISCV_ARCH_REGS_hstatus		34
+#define RISCV_ARCH_REGS_sp_exec		35
+#define RISCV_ARCH_REGS_last		36
 
 #define RISCV_ARCH_REGS_OFFSET(x)	((RISCV_ARCH_REGS_##x) * __SIZEOF_POINTER__)
 #define RISCV_ARCH_REGS_SIZE		RISCV_ARCH_REGS_OFFSET(last)

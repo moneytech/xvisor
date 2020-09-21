@@ -88,59 +88,10 @@ unsigned long smp_read_logical_id(void)
 	return start_secondary_smp_id;
 }
 
-static const struct smp_operations *__init smp_get_ops(const char *name)
-{
-	u32 i, count;
-	const struct smp_operations *ops;
-	struct vmm_devtree_nidtbl_entry *nide;
-
-	count = vmm_devtree_nidtbl_count();
-	for (i = 0; i < count; i++) {
-		nide = vmm_devtree_nidtbl_get(i);
-		if (strcmp(nide->subsys, "smp_ops")) {
-			continue;
-		}
-		ops = nide->nodeid.data;
-		if (!strcmp(name, ops->name)) {
-			return ops;
-		}
-	}
-	
-	return NULL;
-}
-
-/*
- * Read a cpu's enable method from the device tree and 
- * record it in smp_cpu_ops.
- */
 static int __init smp_read_ops(struct vmm_devtree_node *dn, int cpu)
 {
-	int rc;
-	const char *enable_method;
-
-	rc = vmm_devtree_read_string(dn,
-		VMM_DEVTREE_ENABLE_METHOD_ATTR_NAME, &enable_method);
-	if (rc) {
-		/*
-		 * The boot CPU may not have an enable method (e.g. when
-		 * spin-table is used for secondaries). Don't warn spuriously.
-		 */
-		if (cpu != 0) {
-			vmm_printf("%s: missing enable-method DT property\n",
-				   dn->name);
-			vmm_printf("%s: falling back to default SMP ops\n",
-				   dn->name);
-		}
-		smp_cpu_ops[cpu] = &smp_default_ops;
-		return 0;
-	}
-
-	smp_cpu_ops[cpu] = smp_get_ops(enable_method);
-	if (!smp_cpu_ops[cpu]) {
-		vmm_printf("%s: unsupported enable-method property: %s\n",
-			   dn->name, enable_method);
-		return VMM_ENOTAVAIL;
-	}
+	/* Unlike ARM, we don't have a enable-method property in RISC-V */
+	smp_cpu_ops[cpu] = &smp_default_ops;
 
 	return 0;
 }
@@ -173,7 +124,7 @@ int __init arch_smp_init_cpus(void)
 {
 	int rc;
 	const char *str;
-	unsigned int i, cpus_count = 0, cpu = 1;
+	unsigned int i, cpu = 1;
 	bool bootcpu_valid = false;
 	physical_addr_t hwid;
 	struct vmm_devtree_node *dn, *cpus;
@@ -198,25 +149,10 @@ int __init arch_smp_init_cpus(void)
 		if (strcmp(str, VMM_DEVTREE_DEVICE_TYPE_VAL_CPU)) {
 			continue;
 		}
-		cpus_count++;
-	}
-
-	dn = NULL;
-	vmm_devtree_for_each_child(dn, cpus) {
-		str = NULL;
-		rc = vmm_devtree_read_string(dn,
-				VMM_DEVTREE_DEVICE_TYPE_ATTR_NAME, &str);
-		if (rc || !str) {
-			continue;
-		}
-		if (strcmp(str, VMM_DEVTREE_DEVICE_TYPE_VAL_CPU)) {
-			continue;
-		}
 		rc = vmm_devtree_read_physaddr(dn,
 			VMM_DEVTREE_REG_ATTR_NAME, &hwid);
 		if ((rc == VMM_OK) &&
-		    ((cpus_count < 2) ||
-		     (hwid == _bootcpu_reg0))) {
+		     (hwid == _bootcpu_reg0)) {
 			smp_logical_map(0) = hwid;
 			break;
 		}
@@ -233,6 +169,16 @@ int __init arch_smp_init_cpus(void)
 
 	dn = NULL;
 	vmm_devtree_for_each_child(dn, cpus) {
+		str = NULL;
+		rc = vmm_devtree_read_string(dn,
+				VMM_DEVTREE_DEVICE_TYPE_ATTR_NAME, &str);
+		if (rc || !str) {
+			continue;
+		}
+		if (strcmp(str, VMM_DEVTREE_DEVICE_TYPE_VAL_CPU)) {
+			continue;
+		}
+
 		/*
 		 * A cpu node with missing "reg" property is
 		 * considered invalid to build a smp_logical_map

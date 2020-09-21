@@ -47,6 +47,12 @@ struct cpu_page {
 };
 
 /** page table */
+enum cpu_pgtbl_stages {
+	PGTBL_STAGE1=1,
+	PGTBL_STAGE2=2,
+};
+
+/** page table */
 struct cpu_pgtbl {
 	struct dlist head;
 	struct cpu_pgtbl *parent;
@@ -88,16 +94,34 @@ int cpu_mmu_unmap_hypervisor_page(struct cpu_page *pg);
 
 int cpu_mmu_map_hypervisor_page(struct cpu_page *pg);
 
+struct cpu_pgtbl *cpu_mmu_stage2_current_pgtbl(void);
+
+u32 cpu_mmu_stage2_current_vmid(void);
+
+int cpu_mmu_stage2_change_pgtbl(u32 vmid, struct cpu_pgtbl *pgtbl);
+
+#endif
+
+#ifdef CONFIG_64BIT
+typedef u64 cpu_pte_t;
+#else
+typedef u32 cpu_pte_t;
 #endif
 
 #define PGTBL_INITIAL_TABLE_COUNT			8
 #define PGTBL_TABLE_SIZE				0x00001000
 #define PGTBL_TABLE_SIZE_SHIFT				12
+#ifdef CONFIG_64BIT
 #define PGTBL_TABLE_ENTCNT				512
 #define PGTBL_TABLE_ENTSZ				8
+#else
+#define PGTBL_TABLE_ENTCNT				1024
+#define PGTBL_TABLE_ENTSZ				4
+#endif
 #define PGTBL_PAGE_SIZE					0x00001000
 #define PGTBL_PAGE_SIZE_SHIFT				12
 
+#ifdef CONFIG_64BIT
 /* L3 index Bit[47:39] */
 #define PGTBL_L3_INDEX_MASK				0x0000FF8000000000ULL
 #define PGTBL_L3_INDEX_SHIFT				39
@@ -117,8 +141,23 @@ int cpu_mmu_map_hypervisor_page(struct cpu_page *pg);
 /* L0 index Bit[20:12] */
 #define PGTBL_L0_INDEX_MASK				0x00000000001FF000ULL
 #define PGTBL_L0_INDEX_SHIFT				12
+#define PGTBL_L0_BLOCK_SHIFT				12
 #define PGTBL_L0_BLOCK_SIZE				0x0000000000001000ULL
 #define PGTBL_L0_MAP_MASK				(~(PGTBL_L0_BLOCK_SIZE - 1))
+#else
+/* L1 index Bit[31:22] */
+#define PGTBL_L1_INDEX_MASK				0xFFC00000UL
+#define PGTBL_L1_INDEX_SHIFT				22
+#define PGTBL_L1_BLOCK_SHIFT				22
+#define PGTBL_L1_BLOCK_SIZE				0x00400000UL
+#define PGTBL_L1_MAP_MASK				(~(PGTBL_L1_BLOCK_SIZE - 1))
+/* L0 index Bit[21:12] */
+#define PGTBL_L0_INDEX_MASK				0x003FF000UL
+#define PGTBL_L0_INDEX_SHIFT				12
+#define PGTBL_L0_BLOCK_SHIFT				12
+#define PGTBL_L0_BLOCK_SIZE				0x00001000UL
+#define PGTBL_L0_MAP_MASK				(~(PGTBL_L0_BLOCK_SIZE - 1))
+#endif
 
 #define PGTBL_PTE_ADDR_MASK				0x003FFFFFFFFFFC00ULL
 #define PGTBL_PTE_ADDR_SHIFT				10

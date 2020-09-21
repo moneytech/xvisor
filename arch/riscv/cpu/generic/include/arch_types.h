@@ -24,7 +24,11 @@
 #define _ARCH_TYPES_H__
 
 /** cpu specific types */
-#if __riscv_xlen == 64
+#ifdef CONFIG_64BIT
+#if __riscv_xlen != 64
+#error "Need 64bit toolchain for 64bit system"
+#endif
+
 typedef unsigned int irq_flags_t;
 typedef unsigned long virtual_addr_t;
 typedef unsigned long virtual_size_t;
@@ -42,26 +46,27 @@ typedef unsigned long physical_size_t;
 #define ARCH_BITS_PER_LONG		64
 #define ARCH_BITS_PER_LONG_LONG		64
 
-#elif __riscv_xlen == 32
-typedef unsigned int irq_flags_t;
-typedef unsigned int virtual_addr_t;
-typedef unsigned int virtual_size_t;
-typedef unsigned long long physical_addr_t;
-typedef unsigned long long physical_size_t;
+#else /* assume 32bit system */
+#if __riscv_xlen != 32
+#error "Need 32bit toolchain for 32bit system"
+#endif
 
-#define __ARCH_PRIADDR_PREFIX	""
+typedef unsigned int irq_flags_t;
+typedef unsigned long virtual_addr_t;
+typedef unsigned long virtual_size_t;
+typedef unsigned long physical_addr_t;
+typedef unsigned long physical_size_t;
+
+#define __ARCH_PRIADDR_PREFIX	"l"
 #define __ARCH_PRIADDR_DIGITS	"8"
-#define __ARCH_PRISIZE_PREFIX	""
-#define __ARCH_PRIPADDR_PREFIX	"ll"
-#define __ARCH_PRIPADDR_DIGITS	"16"
-#define __ARCH_PRIPSIZE_PREFIX	"ll"
+#define __ARCH_PRISIZE_PREFIX	"l"
+#define __ARCH_PRIPADDR_PREFIX	"l"
+#define __ARCH_PRIPADDR_DIGITS	"8"
+#define __ARCH_PRIPSIZE_PREFIX	"l"
 #define __ARCH_PRI64_PREFIX	"ll"
 
 #define ARCH_BITS_PER_LONG		32
 #define ARCH_BITS_PER_LONG_LONG		64
-
-#else
-#error "Unexpected __riscv_xlen"
 #endif
 
 typedef struct {

@@ -22,8 +22,8 @@ BUILD_OUTPUT_PATH=`pwd`/build
 BUILD_INSTALL_PATH=`pwd`/install
 BUILD_XVISOR_SOURCE_PATH=`pwd`
 BUILD_TARBALL_PATH=`pwd`/tarball
-BUILD_LINUX_VERSION="4.15"
-BUILD_BUSYBOX_VERSION="1.27.2"
+BUILD_LINUX_VERSION="5.4.6"
+BUILD_BUSYBOX_VERSION="1.31.1"
 
 while getopts "d:hj:l:i:o:p:" o; do
 	case "${o}" in
@@ -80,6 +80,7 @@ fi
 
 BUILD_SCRIPTS_PATH=`dirname $0`
 
+
 mkdir -p ${BUILD_OUTPUT_PATH}/arm
 
 ${BUILD_SCRIPTS_PATH}/build-arm-images.sh -a v5 -g versatilepb -s one_guest_versatilepb -d ${BUILD_TARBALL_PATH} -l ${BUILD_LINUX_VERSION} -b ${BUILD_BUSYBOX_VERSION} -p ${BUILD_XVISOR_SOURCE_PATH} -o ${BUILD_OUTPUT_PATH}/arm/v5 -i ${BUILD_INSTALL_PATH}/arm/v5 -j ${BUILD_NUM_THREADS}
@@ -131,6 +132,24 @@ ${BUILD_SCRIPTS_PATH}/build-arm-images.sh -a v8 -g virt-v8 -s two_novgic_guest_v
 rm -rf ${BUILD_OUTPUT_PATH}/arm/v8
 
 rm -rf ${BUILD_OUTPUT_PATH}/arm
+
+
+mkdir -p ${BUILD_OUTPUT_PATH}/riscv
+
+${BUILD_SCRIPTS_PATH}/build-riscv-images.sh -a 32b -g virt32 -s one_guest_virt32 -d ${BUILD_TARBALL_PATH} -l ${BUILD_LINUX_VERSION} -b ${BUILD_BUSYBOX_VERSION} -p ${BUILD_XVISOR_SOURCE_PATH} -o ${BUILD_OUTPUT_PATH}/riscv/rv32 -i ${BUILD_INSTALL_PATH}/riscv/rv32 -j ${BUILD_NUM_THREADS}
+${BUILD_SCRIPTS_PATH}/build-riscv-images.sh -a 32b -g virt32 -s two_guest_virt32 -d ${BUILD_TARBALL_PATH} -l ${BUILD_LINUX_VERSION} -b ${BUILD_BUSYBOX_VERSION} -p ${BUILD_XVISOR_SOURCE_PATH} -o ${BUILD_OUTPUT_PATH}/riscv/rv32 -i ${BUILD_INSTALL_PATH}/riscv/rv32 -j ${BUILD_NUM_THREADS}
+rm -rf ${BUILD_OUTPUT_PATH}/riscv/rv32
+
+${BUILD_SCRIPTS_PATH}/build-riscv-images.sh -a 64b -g virt32 -s one_guest_virt32 -d ${BUILD_TARBALL_PATH} -l ${BUILD_LINUX_VERSION} -b ${BUILD_BUSYBOX_VERSION} -p ${BUILD_XVISOR_SOURCE_PATH} -o ${BUILD_OUTPUT_PATH}/riscv/rv64 -i ${BUILD_INSTALL_PATH}/riscv/rv64 -j ${BUILD_NUM_THREADS}
+${BUILD_SCRIPTS_PATH}/build-riscv-images.sh -a 64b -g virt32 -s two_guest_virt32 -d ${BUILD_TARBALL_PATH} -l ${BUILD_LINUX_VERSION} -b ${BUILD_BUSYBOX_VERSION} -p ${BUILD_XVISOR_SOURCE_PATH} -o ${BUILD_OUTPUT_PATH}/riscv/rv64 -i ${BUILD_INSTALL_PATH}/riscv/rv64 -j ${BUILD_NUM_THREADS}
+${BUILD_SCRIPTS_PATH}/build-riscv-images.sh -a 64b -g virt64 -s one_guest_virt64 -d ${BUILD_TARBALL_PATH} -l ${BUILD_LINUX_VERSION} -b ${BUILD_BUSYBOX_VERSION} -p ${BUILD_XVISOR_SOURCE_PATH} -o ${BUILD_OUTPUT_PATH}/riscv/rv64 -i ${BUILD_INSTALL_PATH}/riscv/rv64 -j ${BUILD_NUM_THREADS}
+${BUILD_SCRIPTS_PATH}/build-riscv-images.sh -a 64b -g virt64 -s two_guest_virt64 -d ${BUILD_TARBALL_PATH} -l ${BUILD_LINUX_VERSION} -b ${BUILD_BUSYBOX_VERSION} -p ${BUILD_XVISOR_SOURCE_PATH} -o ${BUILD_OUTPUT_PATH}/riscv/rv64 -i ${BUILD_INSTALL_PATH}/riscv/rv64 -j ${BUILD_NUM_THREADS}
+rm -rf ${BUILD_OUTPUT_PATH}/riscv/rv64
+
+rm -rf ${BUILD_OUTPUT_PATH}/riscv
+
+
+mkdir -p ${BUILD_OUTPUT_PATH}/x86
 
 mkdir -p ${BUILD_OUTPUT_PATH}/x86/x86_64
 mkdir -p ${BUILD_INSTALL_PATH}/x86/x86_64

@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -71,13 +71,13 @@ struct virtio_blk_dev {
 	struct vmm_virtio_queue 	vqs[VIRTIO_BLK_NUM_QUEUES];
 	struct vmm_virtio_iovec		iov[VIRTIO_BLK_QUEUE_SIZE];
 	struct virtio_blk_dev_req	reqs[VIRTIO_BLK_QUEUE_SIZE];
-	u32 				features;
+	u64 				features;
 
 	struct vmm_virtio_blk_config 	config;
 	struct vmm_vdisk		*vdisk;
 };
 
-static u32 virtio_blk_get_host_features(struct vmm_virtio_device *dev)
+static u64 virtio_blk_get_host_features(struct vmm_virtio_device *dev)
 {
 	return	1UL << VMM_VIRTIO_BLK_F_SEG_MAX
 		| 1UL << VMM_VIRTIO_BLK_F_BLK_SIZE
@@ -89,11 +89,15 @@ static u32 virtio_blk_get_host_features(struct vmm_virtio_device *dev)
 }
 
 static void virtio_blk_set_guest_features(struct vmm_virtio_device *dev,
-					  u32 features)
+					  u32 select, u32 features)
 {
 	struct virtio_blk_dev *vbdev = dev->emu_data;
 
-	vbdev->features = features;
+	if (1 < select)
+		return;
+
+	vbdev->features &= ~((u64)UINT_MAX << (select * 32));
+	vbdev->features |= ((u64)features << (select * 32));
 }
 
 static int virtio_blk_init_vq(struct vmm_virtio_device *dev,
@@ -383,6 +387,8 @@ static void virtio_blk_do_io(struct vmm_virtio_device *dev,
 			}
 			break;
 		default:
+			vmm_printf("%s: unhandled hdr.type=%d\n",
+				   __func__, hdr.type);
 			break;
 		};
 	}

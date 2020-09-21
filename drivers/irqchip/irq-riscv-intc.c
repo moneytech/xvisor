@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -34,12 +34,16 @@
 #include <vmm_compiler.h>
 #include <vmm_stdio.h>
 #include <vmm_smp.h>
+#include <vmm_cpuhp.h>
 #include <vmm_host_io.h>
 #include <vmm_host_irq.h>
 #include <vmm_host_irqdomain.h>
-#include <drv/irqchip/riscv-intc.h>
+
+#include <cpu_sbi.h>
+#include <riscv_encoding.h>
 #include <riscv_csr.h>
-#include <riscv_sbi.h>
+
+#define RISCV_IRQ_COUNT __riscv_xlen
 
 struct riscv_irqchip_intc {
 	struct vmm_host_irqdomain *domain;
@@ -66,26 +70,12 @@ static void riscv_irqchip_ack_irq(struct vmm_host_irq *d)
 static void riscv_irqchip_raise(struct vmm_host_irq *d,
 				const struct vmm_cpumask *mask)
 {
-	int rc;
-	u32 cpu;
-	unsigned long hart;
 	struct vmm_cpumask tmask;
 
-	if (d->hwirq != RISCV_IRQ_SUPERVISOR_SOFTWARE)
+	if (d->hwirq != IRQ_S_SOFT)
 		return;
 
-	vmm_cpumask_clear(&tmask);
-	for_each_cpu(cpu, mask) {
-		rc = vmm_smp_map_hwid(cpu, &hart);
-		if (rc || (CONFIG_CPU_COUNT <= hart)) {
-			vmm_lwarning("riscv-intc",
-				     "ignoring IPI to cpu=%d (hard=0x%lx)\n",
-				     cpu, hart);
-			continue;
-		}
-		vmm_cpumask_set_cpu(hart, &tmask);
-	}
-
+	sbi_cpumask_to_hartmask(mask, &tmask);
 	sbi_send_ipi(vmm_cpumask_bits(&tmask));
 }
 #endif
@@ -150,7 +140,22 @@ static int riscv_hart_of_timer(struct vmm_devtree_node *node, u32 *hart_id)
 	return VMM_OK;
 }
 
-static int __cpuinit riscv_intc_init(struct vmm_devtree_node *node)
+static int riscv_intc_startup(struct vmm_cpuhp_notify *cpuhp, u32 cpu)
+{
+	/* Disable and clear all per-CPU interupts */
+	csr_write(sie, 0UL);
+	csr_write(sip, 0UL);
+
+	return VMM_OK;
+}
+
+static struct vmm_cpuhp_notify riscv_intc_cpuhp = {
+	.name = "RISCV_INTC",
+	.state = VMM_CPUHP_STATE_HOST_IRQ,
+	.startup = riscv_intc_startup,
+};
+
+static int __init riscv_intc_init(struct vmm_devtree_node *node)
 {
 	int i, rc;
 	u32 hart_id = 0;
@@ -164,10 +169,6 @@ static int __cpuinit riscv_intc_init(struct vmm_devtree_node *node)
 		return VMM_OK;
 	}
 
-	if (!vmm_smp_is_bootcpu()) {
-		goto disable_irqs;
-	}
-
 	intc.domain = vmm_host_irqdomain_add(node, 0, RISCV_IRQ_COUNT,
 					     &riscv_intc_ops, NULL);
 	if (!intc.domain) {
@@ -176,19 +177,13 @@ static int __cpuinit riscv_intc_init(struct vmm_devtree_node *node)
 
 	/* Setup up per-CPU interrupts */
 	for (i = 0; i < RISCV_IRQ_COUNT; i++) {
-		riscv_irqchip_register_irq(i,
-			(i == RISCV_IRQ_SUPERVISOR_SOFTWARE) ? TRUE : FALSE,
-			&riscv_irqchip);
+		riscv_irqchip_register_irq(i, (i == IRQ_S_SOFT) ? TRUE : FALSE,
+					   &riscv_irqchip);
 	}
 
 	vmm_host_irq_set_active_callback(riscv_intc_active_irq);
 
-disable_irqs:
-	/* Disable and clear all per-CPU interupts */
-	csr_write(sie, 0UL);
-	csr_write(sip, 0UL);
-
-	return VMM_OK;
+	return vmm_cpuhp_register(&riscv_intc_cpuhp, TRUE);
 }
 
 VMM_HOST_IRQ_INIT_DECLARE(riscvintc, "riscv,cpu-intc", riscv_intc_init);

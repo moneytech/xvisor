@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -19,7 +19,6 @@
  * @file cpu_atomic64.c
  * @author Anup Patel (anup@brainfault.org)
  * @brief RISC-V specific 64 bits synchronization mechanisms.
- *
  */
 
 #include <vmm_error.h>
@@ -28,6 +27,8 @@
 #include <arch_cpu_irq.h>
 #include <arch_barrier.h>
 #include <arch_atomic64.h>
+
+#include <riscv_lrsc.h>
 
 u64 __lock arch_atomic64_read(atomic64_t *atom)
 {
@@ -41,6 +42,80 @@ void __lock arch_atomic64_write(atomic64_t *atom, u64 value)
 	atom->counter = value;
 	arch_wmb();
 }
+
+#ifndef CONFIG_64BIT
+void __lock arch_atomic64_add(atomic64_t *atom, u64 value)
+{
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	atom->counter += value;
+	arch_cpu_irq_restore(flags);
+}
+
+void __lock arch_atomic64_sub(atomic64_t *atom, u64 value)
+{
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	atom->counter -= value;
+	arch_cpu_irq_restore(flags);
+}
+
+u64 __lock arch_atomic64_add_return(atomic64_t *atom, u64 value)
+{
+	u64 temp;
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	atom->counter += value;
+	temp = atom->counter;
+	arch_cpu_irq_restore(flags);
+
+	return temp;
+}
+
+u64 __lock arch_atomic64_sub_return(atomic64_t *atom, u64 value)
+{
+	u64 temp;
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	atom->counter -= value;
+	temp = atom->counter;
+	arch_cpu_irq_restore(flags);
+
+	return temp;
+}
+
+u64 __lock arch_atomic64_xchg(atomic64_t *atom, u64 newval)
+{
+	u64 previous;
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	previous = atom->counter;
+	atom->counter = newval;
+	arch_cpu_irq_restore(flags);
+
+	return previous;
+}
+
+u64 __lock arch_atomic64_cmpxchg(atomic64_t *atom, u64 oldval, u64 newval)
+{
+	u64 previous;
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	previous = atom->counter;
+	if (previous == oldval) {
+		atom->counter = newval;
+	}
+	arch_cpu_irq_restore(flags);
+
+	return previous;
+}
+#else
 
 void __lock arch_atomic64_add(atomic64_t *atom, u64 value)
 {
@@ -70,7 +145,7 @@ u64 __lock arch_atomic64_add_return(atomic64_t *atom, u64 value)
 		: "r" (value)
 		: "memory");
 
-	return ret;
+	return ret + value;
 }
 
 u64 __lock arch_atomic64_sub_return(atomic64_t *atom, u64 value)
@@ -83,56 +158,16 @@ u64 __lock arch_atomic64_sub_return(atomic64_t *atom, u64 value)
 		: "r" (-value)
 		: "memory");
 
-	return ret;
+	return ret - value;
 }
 
-#define __cmpxchg(ptr, old, new, size)					\
-({									\
-	__typeof__(ptr) __ptr = (ptr);					\
-	__typeof__(*(ptr)) __old = (old);				\
-	__typeof__(*(ptr)) __new = (new);				\
-	__typeof__(*(ptr)) __ret;					\
-	register unsigned int __rc;					\
-	switch (size) {							\
-	case 4:								\
-		__asm__ __volatile__ (					\
-			"0:	lr.w %0, %2\n"				\
-			"	bne  %0, %z3, 1f\n"			\
-			"	sc.w.rl %1, %z4, %2\n"			\
-			"	bnez %1, 0b\n"				\
-			"	fence rw, rw\n"				\
-			"1:\n"						\
-			: "=&r" (__ret), "=&r" (__rc), "+A" (*__ptr)	\
-			: "rJ" (__old), "rJ" (__new)			\
-			: "memory");					\
-		break;							\
-	case 8:								\
-		__asm__ __volatile__ (					\
-			"0:	lr.d %0, %2\n"				\
-			"	bne %0, %z3, 1f\n"			\
-			"	sc.d.rl %1, %z4, %2\n"			\
-			"	bnez %1, 0b\n"				\
-			"	fence rw, rw\n"				\
-			"1:\n"						\
-			: "=&r" (__ret), "=&r" (__rc), "+A" (*__ptr)	\
-			: "rJ" (__old), "rJ" (__new)			\
-			: "memory");					\
-		break;							\
-	default:							\
-		break;							\
-	}								\
-	__ret;								\
-})
-
-#define cmpxchg(ptr, o, n)						\
-({									\
-	__typeof__(*(ptr)) _o_ = (o);					\
-	__typeof__(*(ptr)) _n_ = (n);					\
-	(__typeof__(*(ptr))) __cmpxchg((ptr),				\
-				       _o_, _n_, sizeof(*(ptr)));	\
-})
+u64 __lock arch_atomic64_xchg(atomic64_t *atom, u64 newval)
+{
+	return xchg(&atom->counter, newval);
+}
 
 u64 __lock arch_atomic64_cmpxchg(atomic64_t *atom, u64 oldval, u64 newval)
 {
 	return cmpxchg(&atom->counter, oldval, newval);
 }
+#endif

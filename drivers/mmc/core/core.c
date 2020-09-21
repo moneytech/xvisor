@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -64,7 +64,7 @@
 #define DPRINTF(msg...)
 #endif
 
-/* 
+/*
  * Set block count limit because of 16 bit register limit on some hardware
  */
 #ifndef CONFIG_SYS_MMC_MAX_BLK_COUNT
@@ -105,29 +105,72 @@ unsigned int mmc_align_data_size(struct mmc_card *card,
 	return sz;
 }
 
-static void __mmc_set_ios(struct mmc_host *host)
+static int __mmc_set_ios(struct mmc_host *host)
 {
 	if (host->ops.set_ios) {
-		host->ops.set_ios(host, &host->ios);
+		return host->ops.set_ios(host, &host->ios);
 	}
+	return VMM_ENOTSUPP;
 }
 
-void mmc_set_clock(struct mmc_host *host, u32 clock)
+int mmc_set_clock(struct mmc_host *host, u32 clock, bool disable)
 {
-	if (clock > host->f_max)
-		clock = host->f_max;
+	if (!disable) {
+		if (clock > host->f_max)
+			clock = host->f_max;
 
-	if (clock < host->f_min)
-		clock = host->f_min;
+		if (clock < host->f_min)
+			clock = host->f_min;
+	}
 
 	host->ios.clock = clock;
-	__mmc_set_ios(host);
+	host->ios.clk_disable = disable;
+	return __mmc_set_ios(host);
 }
 
-void mmc_set_bus_width(struct mmc_host *host, u32 width)
+int mmc_set_bus_width(struct mmc_host *host, u32 width)
 {
 	host->ios.bus_width = width;
-	__mmc_set_ios(host);
+	return __mmc_set_ios(host);
+}
+
+int mmc_set_signal_voltage(struct mmc_host *host, enum mmc_voltage voltage)
+{
+	host->ios.signal_voltage = voltage;
+	return __mmc_set_ios(host);
+}
+
+int mmc_signal_voltage_to_mv(enum mmc_voltage voltage)
+{
+	switch (voltage) {
+	case MMC_SIGNAL_VOLTAGE_000: return 0;
+	case MMC_SIGNAL_VOLTAGE_330: return 3300;
+	case MMC_SIGNAL_VOLTAGE_180: return 1800;
+	case MMC_SIGNAL_VOLTAGE_120: return 1200;
+	}
+	return VMM_EINVALID;
+}
+
+/*
+ * put the host in the initial state:
+ * - turn on Vdd (card power supply)
+ * - configure the bus width and clock to minimal values
+ */
+int mmc_set_initial_state(struct mmc_host *host)
+{
+	int err;
+
+	/* First try to set 3.3V. If it fails set to 1.8V */
+	err = mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330);
+	if (err != 0)
+		err = mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_180);
+	if (err != 0)
+		return err;
+
+	mmc_set_bus_width(host, 1);
+	mmc_set_clock(host, 1, FALSE);
+
+	return 0;
 }
 
 int mmc_init_card(struct mmc_host *host, struct mmc_card *card)
@@ -148,7 +191,16 @@ int mmc_getcd(struct mmc_host *host)
 	return VMM_ENOTSUPP;
 }
 
-int mmc_send_cmd(struct mmc_host *host, 
+int mmc_execute_tuning(struct mmc_host *host, u32 opcode)
+{
+	if (host->ops.execute_tuning) {
+		return host->ops.execute_tuning(host, opcode);
+	}
+
+	return VMM_ENOTSUPP;
+}
+
+int mmc_send_cmd(struct mmc_host *host,
 		 struct mmc_cmd *cmd,
 		 struct mmc_data *data)
 {
@@ -454,8 +506,16 @@ struct mmc_host *mmc_alloc_host(int extra, struct vmm_device *dev)
 }
 VMM_EXPORT_SYMBOL(mmc_alloc_host);
 
+static struct vmm_blockrq_ops mmc_rq_ops = {
+	.read = mmc_blockrq_read,
+	.write = mmc_blockrq_write,
+	.abort = mmc_blockrq_abort,
+	.flush = mmc_blockrq_flush
+};
+
 int mmc_add_host(struct mmc_host *host)
 {
+	int rc;
 	char name[32];
 
 	if (!host || host->brq) {
@@ -466,15 +526,31 @@ int mmc_add_host(struct mmc_host *host)
 		host->b_max = CONFIG_SYS_MMC_MAX_BLK_COUNT;
 	}
 
+	/* We assume that MMC host always supports SD/MMC legacy modes */
+	host->caps |= MMC_CAP_MODE_LEGACY;
+	if (host->caps & MMC_CAP_MODE_8BIT) {
+		/* 8-bit mode imply 4-bit and 1-bit modes are available. */
+		host->caps |= MMC_CAP_MODE_4BIT;
+		host->caps |= MMC_CAP_MODE_1BIT;
+	} else if (host->caps & MMC_CAP_MODE_4BIT) {
+		/* 4-bit mode imply 1-bit mode is available. */
+		host->caps |= MMC_CAP_MODE_1BIT;
+	} else if (!(host->caps & MMC_CAP_MODE_1BIT)) {
+		/* MMC host must atleast provide 1-bit mode */
+		return VMM_EINVALID;
+	}
+
+	if (host->ops.init) {
+		rc = host->ops.init(host, 0);
+		if (rc)
+			return rc;
+	}
+
 	vmm_mutex_lock(&mmc_host_list_mutex);
 
 	vmm_snprintf(name, 32, "mmc%d", mmc_host_count);
 	host->brq = vmm_blockrq_create(name, 128, FALSE,
-				       mmc_blockrq_read,
-				       mmc_blockrq_write,
-				       mmc_blockrq_abort,
-				       mmc_blockrq_flush,
-				       host);
+				       &mmc_rq_ops, host);
 	if (!host->brq) {
 		vmm_mutex_unlock(&mmc_host_list_mutex);
 		return VMM_EFAIL;
@@ -486,7 +562,7 @@ int mmc_add_host(struct mmc_host *host)
 
 	vmm_mutex_unlock(&mmc_host_list_mutex);
 
-	/* Make an attempt to detect mmc card 
+	/* Make an attempt to detect mmc card
 	 * Note: If it fails then it means there is not card connected so
 	 * we ignore failures.
 	 */

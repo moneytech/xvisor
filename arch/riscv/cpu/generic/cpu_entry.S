@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -24,7 +24,7 @@
 #include <riscv_asm.h>
 #include <riscv_csr.h>
 
-	/* 
+	/*
 	 * _start: Primary CPU startup code
 	 * _start_secondary: Secondary CPU startup code
 	 * _start_secondary_nopen: Secondary CPU startup code without holding pen
@@ -39,14 +39,14 @@
 	.globl _start_secondary_nopen
 _start:
 	/* Mask all interrupts */
-	csrw sie, zero
+	csrw CSR_SIE, zero
 
 	/*
 	 * Disable FPU to detect illegal usage of
 	 * floating point in kernel space
 	 */
-	li t0, SR_FS
-	csrc sstatus, t0
+	li t0, SSTATUS_FS
+	csrc CSR_SSTATUS, t0
 
 #ifdef CONFIG_SMP
 	/* Pick one HART to run the main boot sequence */
@@ -155,6 +155,10 @@ _start_secondary:
 _start_secondary_wait:
 	/* FIXME: We should use WFI to save some energy here. */
 	REG_L	a7, (a6)
+	nop
+	nop
+	nop
+	nop
 	bne	a7, a0, _start_secondary_wait
 #endif
 
@@ -164,7 +168,7 @@ _start_secondary_wait:
 _start_secondary_nopen:
 	/* Set trap vector to spin forever to help debug */
 	la	a6, _start_hang
-	csrw	stvec, a6
+	csrw	CSR_STVEC, a6
 
 	/* Enable MMU */
 	la	a6, _load_start
@@ -179,7 +183,7 @@ _start_secondary_nopen:
 	li	a1, SATP_MODE
 	or	a0, a0, a1
 	sfence.vma
-	csrw	sptbr, a0
+	csrw	CSR_SATP, a0
 
 	/* Jump to final execution address */
 	la	a6, __cpu_init
@@ -220,21 +224,21 @@ _bootcpu_reg0:
 _bootcpu_reg1:
 	RISCV_PTR 0x0
 
-	/* 
+	/*
 	 * Load start address storage
 	 */
 	.globl _load_start
 _load_start:
 	RISCV_PTR 0x0
 
-	/* 
+	/*
 	 * Load end address storage
 	 */
 	.globl _load_end
 _load_end:
 	RISCV_PTR 0x0
 
-	/* 
+	/*
 	 * Exception stacks.
 	 */
 __hvc_stack_end:
@@ -245,7 +249,7 @@ __hvc_stack_end:
 _cpu_init:
 	/* Re-setup exception handler */
 	la	a6, _start_hang
-	csrw	stvec, a6
+	csrw	CSR_STVEC, a6
 
 	/* Setup scratch space */
 	la	a6, __hvc_stack_end
@@ -262,10 +266,10 @@ _cpu_init:
 	sub	a5, a5, a4
 	li	a3, RISCV_SCRATCH_SIZE
 	sub	a5, a5, a3
-	csrw	sscratch, a5
+	csrw	CSR_SSCRATCH, a5
 
 	/* Setup Hypervisor Exception Stack */
-	csrr	tp, sscratch
+	csrr	tp, CSR_SSCRATCH
 	REG_S	tp, RISCV_SCRATCH_EXCE_STACK_OFFSET(tp)
 	add	sp, tp, zero
 
@@ -285,12 +289,9 @@ _cpu_init:
 
 	ret
 
-	/* Exception handling */
-	.align 3
-	.global _handle_exception
-_handle_exception:
+.macro SAVE_ALL
 	/* Swap TP and SSCRATCH */
-	csrrw	tp, sscratch, tp
+	csrrw	tp, CSR_SSCRATCH, tp
 
 	/* Save S0 in scratch space */
 	REG_S	s0, RISCV_SCRATCH_TMP0_OFFSET(tp)
@@ -310,9 +311,10 @@ _handle_exception:
 	REG_S	s0, RISCV_ARCH_REGS_OFFSET(s0)(sp)
 
 	/* Swap TP and SSCRATCH */
-	csrrw	tp, sscratch, tp
+	csrrw	tp, CSR_SSCRATCH, tp
 
-	/* Save all general regisers except ZERO, SP & S0 */
+	/* Save all general regisers except SP & S0 */
+	REG_S	zero, RISCV_ARCH_REGS_OFFSET(zero)(sp)
 	REG_S	ra, RISCV_ARCH_REGS_OFFSET(ra)(sp)
 	REG_S	gp, RISCV_ARCH_REGS_OFFSET(gp)(sp)
 	REG_S	tp, RISCV_ARCH_REGS_OFFSET(tp)(sp)
@@ -344,29 +346,44 @@ _handle_exception:
 	REG_S	t6, RISCV_ARCH_REGS_OFFSET(t6)(sp)
 
 	/* Save SEPC and SSTATUS CSRs */
-	csrr	s0, sepc
+	csrr	s0, CSR_SEPC
 	REG_S	s0, RISCV_ARCH_REGS_OFFSET(sepc)(sp)
-	csrr	s1, sstatus
+	csrr	s1, CSR_SSTATUS
 	REG_S	s1, RISCV_ARCH_REGS_OFFSET(sstatus)(sp)
+.endm
 
+.macro SAVE_HSTATUS
+	csrr	s2, CSR_HSTATUS
+	REG_S	s2, RISCV_ARCH_REGS_OFFSET(hstatus)(sp)
+.endm
+
+.macro HANDLE_EXCEPTION
 	/* Save exception SP */
-	add	s2, sp, RISCV_ARCH_REGS_SIZE
-	REG_S	s2, RISCV_ARCH_REGS_OFFSET(sp_exec)(sp)
+	add	s3, sp, RISCV_ARCH_REGS_SIZE
+	REG_S	s3, RISCV_ARCH_REGS_OFFSET(sp_exec)(sp)
 
 	/* Call C routine */
 	add	a0, sp, zero
 	call	do_handle_exception
+.endm
 
+.macro RESTORE_HSTATUS
+	/* Restore HSSTATUS */
+	REG_L	s4, RISCV_ARCH_REGS_OFFSET(hstatus)(sp)
+	csrw	CSR_HSTATUS, s4
+.endm
+
+.macro RESTORE_ALL
 	/* Restore exception SP in scratch space */
 	REG_L	s0, RISCV_ARCH_REGS_OFFSET(sp_exec)(sp)
-	csrr	s1, sscratch
+	csrr	s1, CSR_SSCRATCH
 	REG_S	s0, RISCV_SCRATCH_EXCE_STACK_OFFSET(s1)
 
-	/* Restore SEPC and SSTATUS CSRs */
+	/* Restore SEPC, SSTATUS */
 	REG_L	s2, RISCV_ARCH_REGS_OFFSET(sepc)(sp)
-	csrw	sepc, s2
+	csrw	CSR_SEPC, s2
 	REG_L	s3, RISCV_ARCH_REGS_OFFSET(sstatus)(sp)
-	csrw	sstatus, s3
+	csrw	CSR_SSTATUS, s3
 
 	/* Restore all general regisers except SP */
 	REG_L	ra, RISCV_ARCH_REGS_OFFSET(ra)(sp)
@@ -402,5 +419,31 @@ _handle_exception:
 
 	/* Restore SP */
 	REG_L	sp, RISCV_ARCH_REGS_OFFSET(sp)(sp)
+.endm
+
+	/* Exception handling */
+	.align 3
+	.global _handle_exception
+_handle_exception:
+	SAVE_ALL
+
+	HANDLE_EXCEPTION
+
+	RESTORE_ALL
+
+	sret
+
+	.align 3
+	.global _handle_hyp_exception
+_handle_hyp_exception:
+	SAVE_ALL
+
+	SAVE_HSTATUS
+
+	HANDLE_EXCEPTION
+
+	RESTORE_HSTATUS
+
+	RESTORE_ALL
 
 	sret

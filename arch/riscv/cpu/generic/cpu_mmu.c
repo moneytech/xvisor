@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -26,10 +26,13 @@
 #include <vmm_smp.h>
 #include <vmm_stdio.h>
 #include <vmm_host_aspace.h>
+#include <libs/stringlib.h>
 #include <arch_sections.h>
 #include <arch_barrier.h>
 
+#include <cpu_tlb.h>
 #include <cpu_mmu.h>
+#include <cpu_sbi.h>
 
 /* Note: we use 1/8th or 12.5% of VAPOOL memory as translation table pool.
  * For example if VAPOOL is 8 MB then translation table pool will be 1 MB
@@ -55,7 +58,7 @@ struct cpu_mmu_ctrl {
 	struct dlist free_pgtbl_list;
 	/* Initialized by memory read/write init */
 	struct cpu_pgtbl *mem_rw_pgtbl[CONFIG_CPU_COUNT];
-	u64 *mem_rw_pte[CONFIG_CPU_COUNT];
+	cpu_pte_t *mem_rw_pte[CONFIG_CPU_COUNT];
 	physical_addr_t mem_rw_outaddr_mask[CONFIG_CPU_COUNT];
 };
 
@@ -64,20 +67,21 @@ static struct cpu_mmu_ctrl mmuctrl;
 u8 __attribute__ ((aligned(PGTBL_TABLE_SIZE))) def_pgtbl[PGTBL_INITIAL_TABLE_SIZE] = { 0 };
 int def_pgtbl_tree[PGTBL_INITIAL_TABLE_COUNT];
 
-static inline void cpu_mmu_sync_pte(u64 *pte)
+static inline void cpu_mmu_sync_pte(cpu_pte_t *pte)
 {
-	/* TODO: */
+	arch_smp_mb();
 }
 
-static inline void cpu_invalid_ipa_guest_tlb(physical_addr_t ipa)
+static inline void cpu_remote_gpa_guest_tlbflush(physical_addr_t gpa,
+						 physical_size_t gsz)
 {
-	/* TODO: */
-	__asm__ __volatile__ ("sfence.vma" : : : "memory");
+	sbi_remote_hfence_gvma(NULL, gpa & ~(gsz - 1), gsz);
 }
 
-static inline void cpu_invalid_va_hypervisor_tlb(virtual_addr_t va)
+static inline void cpu_remote_va_hyp_tlb_flush(virtual_addr_t va,
+					       virtual_size_t sz)
 {
-	__asm__ __volatile__ ("sfence.vma %0" : : "r" (va) : "memory");
+	sbi_remote_sfence_vma(NULL, va & ~(sz - 1), sz);
 }
 
 static struct cpu_pgtbl *cpu_mmu_pgtbl_find(physical_addr_t tbl_pa)
@@ -114,8 +118,11 @@ static inline bool cpu_mmu_pgtbl_isattached(struct cpu_pgtbl *child)
 
 static inline bool cpu_mmu_valid_block_size(physical_size_t sz)
 {
-	if ((sz == PGTBL_L3_BLOCK_SIZE) ||
+	if (
+#ifdef CONFIG_64BIT
+	    (sz == PGTBL_L3_BLOCK_SIZE) ||
 	    (sz == PGTBL_L2_BLOCK_SIZE) ||
+#endif
 	    (sz == PGTBL_L1_BLOCK_SIZE) ||
 	    (sz == PGTBL_L0_BLOCK_SIZE)) {
 		return TRUE;
@@ -130,10 +137,12 @@ static inline physical_size_t cpu_mmu_level_block_size(int level)
 		return PGTBL_L0_BLOCK_SIZE;
 	case 1:
 		return PGTBL_L1_BLOCK_SIZE;
+#ifdef CONFIG_64BIT
 	case 2:
 		return PGTBL_L2_BLOCK_SIZE;
 	case 3:
 		return PGTBL_L3_BLOCK_SIZE;
+#endif
 	default:
 		break;
 	};
@@ -147,10 +156,12 @@ static inline physical_addr_t cpu_mmu_level_map_mask(int level)
 		return PGTBL_L0_MAP_MASK;
 	case 1:
 		return PGTBL_L1_MAP_MASK;
+#ifdef CONFIG_64BIT
 	case 2:
 		return PGTBL_L2_MAP_MASK;
 	case 3:
 		return PGTBL_L3_MAP_MASK;
+#endif
 	default:
 		break;
 	};
@@ -164,10 +175,12 @@ static inline int cpu_mmu_level_index(physical_addr_t ia, int level)
 		return (ia & PGTBL_L0_INDEX_MASK) >> PGTBL_L0_INDEX_SHIFT;
 	case 1:
 		return (ia & PGTBL_L1_INDEX_MASK) >> PGTBL_L1_INDEX_SHIFT;
+#ifdef CONFIG_64BIT
 	case 2:
 		return (ia & PGTBL_L2_INDEX_MASK) >> PGTBL_L2_INDEX_SHIFT;
 	case 3:
 		return (ia & PGTBL_L3_INDEX_MASK) >> PGTBL_L3_INDEX_SHIFT;
+#endif
 	default:
 		break;
 	};
@@ -181,10 +194,12 @@ static inline int cpu_mmu_level_index_shift(int level)
 		return PGTBL_L0_INDEX_SHIFT;
 	case 1:
 		return PGTBL_L1_INDEX_SHIFT;
+#ifdef CONFIG_64BIT
 	case 2:
 		return PGTBL_L2_INDEX_SHIFT;
 	case 3:
 		return PGTBL_L3_INDEX_SHIFT;
+#endif
 	default:
 		break;
 	};
@@ -196,7 +211,7 @@ static int cpu_mmu_pgtbl_attach(struct cpu_pgtbl *parent,
 				struct cpu_pgtbl *child)
 {
 	int index;
-	u64 *pte;
+	cpu_pte_t *pte;
 	irq_flags_t flags;
 
 	if (!parent || !child) {
@@ -211,7 +226,7 @@ static int cpu_mmu_pgtbl_attach(struct cpu_pgtbl *parent,
 	}
 
 	index = cpu_mmu_level_index(map_ia, parent->level);
-	pte = (u64 *)parent->tbl_va;
+	pte = (cpu_pte_t *)parent->tbl_va;
 
 	vmm_spin_lock_irqsave_lite(&parent->tbl_lock, flags);
 
@@ -241,7 +256,7 @@ static int cpu_mmu_pgtbl_attach(struct cpu_pgtbl *parent,
 static int cpu_mmu_pgtbl_deattach(struct cpu_pgtbl *child)
 {
 	int index;
-	u64 *pte;
+	cpu_pte_t *pte;
 	irq_flags_t flags;
 	struct cpu_pgtbl *parent;
 
@@ -251,7 +266,7 @@ static int cpu_mmu_pgtbl_deattach(struct cpu_pgtbl *child)
 
 	parent = child->parent;
 	index = cpu_mmu_level_index(child->map_ia, parent->level);
-	pte = (u64 *)parent->tbl_va;
+	pte = (cpu_pte_t *)parent->tbl_va;
 
 	vmm_spin_lock_irqsave_lite(&parent->tbl_lock, flags);
 
@@ -294,7 +309,7 @@ struct cpu_pgtbl *cpu_mmu_pgtbl_alloc(int stage)
 
 	pgtbl->parent = NULL;
 	pgtbl->stage = stage;
-	pgtbl->level = (stage == 2) ? 
+	pgtbl->level = (stage == PGTBL_STAGE2) ?
 		mmuctrl.stage2_start_level : mmuctrl.stage1_start_level;
 	pgtbl->map_ia = 0;
 	INIT_SPIN_LOCK(&pgtbl->tbl_lock);
@@ -338,7 +353,7 @@ int cpu_mmu_pgtbl_free(struct cpu_pgtbl *pgtbl)
 	pgtbl->pte_cnt = 0;
 	vmm_spin_unlock_irqrestore_lite(&pgtbl->tbl_lock, flags);
 
-	pgtbl->level = (pgtbl->stage == 2) ? 
+	pgtbl->level = (pgtbl->stage == PGTBL_STAGE2) ?
 		mmuctrl.stage2_start_level : mmuctrl.stage1_start_level;
 	pgtbl->map_ia = 0;
 
@@ -355,7 +370,7 @@ struct cpu_pgtbl *cpu_mmu_pgtbl_get_child(struct cpu_pgtbl *parent,
 					  bool create)
 {
 	int rc, index;
-	u64 *pte, pte_val;
+	cpu_pte_t *pte, pte_val;
 	irq_flags_t flags;
 	physical_addr_t tbl_pa;
 	struct cpu_pgtbl *child;
@@ -365,7 +380,7 @@ struct cpu_pgtbl *cpu_mmu_pgtbl_get_child(struct cpu_pgtbl *parent,
 	}
 
 	index = cpu_mmu_level_index(map_ia, parent->level);
-	pte = (u64 *)parent->tbl_va;
+	pte = (cpu_pte_t *)parent->tbl_va;
 
 	vmm_spin_lock_irqsave_lite(&parent->tbl_lock, flags);
 	pte_val = pte[index];
@@ -405,6 +420,7 @@ u64 cpu_mmu_best_page_size(physical_addr_t ia,
 			   physical_addr_t oa,
 			   u32 availsz)
 {
+#ifdef CONFIG_64BIT
 	if (!(ia & (PGTBL_L3_BLOCK_SIZE - 1)) &&
 	    !(oa & (PGTBL_L3_BLOCK_SIZE - 1)) &&
 	    (PGTBL_L3_BLOCK_SIZE <= availsz)) {
@@ -416,7 +432,7 @@ u64 cpu_mmu_best_page_size(physical_addr_t ia,
 	    (PGTBL_L2_BLOCK_SIZE <= availsz)) {
 		return PGTBL_L2_BLOCK_SIZE;
 	}
-
+#endif
 	if (!(ia & (PGTBL_L1_BLOCK_SIZE - 1)) &&
 	    !(oa & (PGTBL_L1_BLOCK_SIZE - 1)) &&
 	    (PGTBL_L1_BLOCK_SIZE <= availsz)) {
@@ -430,7 +446,7 @@ int cpu_mmu_get_page(struct cpu_pgtbl *pgtbl,
 		     physical_addr_t ia, struct cpu_page *pg)
 {
 	int index;
-	u64 *pte;
+	cpu_pte_t *pte;
 	irq_flags_t flags;
 	struct cpu_pgtbl *child;
 
@@ -439,7 +455,7 @@ int cpu_mmu_get_page(struct cpu_pgtbl *pgtbl,
 	}
 
 	index = cpu_mmu_level_index(ia, pgtbl->level);
-	pte = (u64 *)pgtbl->tbl_va;
+	pte = (cpu_pte_t *)pgtbl->tbl_va;
 
 	vmm_spin_lock_irqsave_lite(&pgtbl->tbl_lock, flags);
 
@@ -471,46 +487,24 @@ int cpu_mmu_get_page(struct cpu_pgtbl *pgtbl,
 	pg->oa = pg->oa << PGTBL_PAGE_SIZE_SHIFT;
 	pg->sz = cpu_mmu_level_block_size(pgtbl->level);
 
-	if (pgtbl->stage == 2) {
-		/* TODO: */
-		pg->rsw = (pte[index] & PGTBL_PTE_RSW_MASK) >>
-						PGTBL_PTE_RSW_SHIFT;
-		pg->dirty = (pte[index] & PGTBL_PTE_DIRTY_MASK) >>
-						PGTBL_PTE_DIRTY_SHIFT;
-		pg->accessed = (pte[index] & PGTBL_PTE_ACCESSED_MASK) >>
-						PGTBL_PTE_ACCESSED_SHIFT;
-		pg->global = (pte[index] & PGTBL_PTE_GLOBAL_MASK) >>
-						PGTBL_PTE_GLOBAL_SHIFT;
-		pg->user = (pte[index] & PGTBL_PTE_USER_MASK) >>
-						PGTBL_PTE_USER_SHIFT;
-		pg->execute = (pte[index] & PGTBL_PTE_EXECUTE_MASK) >>
-						PGTBL_PTE_EXECUTE_SHIFT;
-		pg->write = (pte[index] & PGTBL_PTE_WRITE_MASK) >>
-						PGTBL_PTE_WRITE_SHIFT;
-		pg->read = (pte[index] & PGTBL_PTE_READ_MASK) >>
-						PGTBL_PTE_READ_SHIFT;
-		pg->valid = (pte[index] & PGTBL_PTE_VALID_MASK) >>
-						PGTBL_PTE_VALID_SHIFT;
-	} else {
-		pg->rsw = (pte[index] & PGTBL_PTE_RSW_MASK) >>
-						PGTBL_PTE_RSW_SHIFT;
-		pg->dirty = (pte[index] & PGTBL_PTE_DIRTY_MASK) >>
-						PGTBL_PTE_DIRTY_SHIFT;
-		pg->accessed = (pte[index] & PGTBL_PTE_ACCESSED_MASK) >>
-						PGTBL_PTE_ACCESSED_SHIFT;
-		pg->global = (pte[index] & PGTBL_PTE_GLOBAL_MASK) >>
-						PGTBL_PTE_GLOBAL_SHIFT;
-		pg->user = (pte[index] & PGTBL_PTE_USER_MASK) >>
-						PGTBL_PTE_USER_SHIFT;
-		pg->execute = (pte[index] & PGTBL_PTE_EXECUTE_MASK) >>
-						PGTBL_PTE_EXECUTE_SHIFT;
-		pg->write = (pte[index] & PGTBL_PTE_WRITE_MASK) >>
-						PGTBL_PTE_WRITE_SHIFT;
-		pg->read = (pte[index] & PGTBL_PTE_READ_MASK) >>
-						PGTBL_PTE_READ_SHIFT;
-		pg->valid = (pte[index] & PGTBL_PTE_VALID_MASK) >>
-						PGTBL_PTE_VALID_SHIFT;
-	}
+	pg->rsw = (pte[index] & PGTBL_PTE_RSW_MASK) >>
+					PGTBL_PTE_RSW_SHIFT;
+	pg->dirty = (pte[index] & PGTBL_PTE_DIRTY_MASK) >>
+					PGTBL_PTE_DIRTY_SHIFT;
+	pg->accessed = (pte[index] & PGTBL_PTE_ACCESSED_MASK) >>
+					PGTBL_PTE_ACCESSED_SHIFT;
+	pg->global = (pte[index] & PGTBL_PTE_GLOBAL_MASK) >>
+					PGTBL_PTE_GLOBAL_SHIFT;
+	pg->user = (pte[index] & PGTBL_PTE_USER_MASK) >>
+					PGTBL_PTE_USER_SHIFT;
+	pg->execute = (pte[index] & PGTBL_PTE_EXECUTE_MASK) >>
+					PGTBL_PTE_EXECUTE_SHIFT;
+	pg->write = (pte[index] & PGTBL_PTE_WRITE_MASK) >>
+					PGTBL_PTE_WRITE_SHIFT;
+	pg->read = (pte[index] & PGTBL_PTE_READ_MASK) >>
+					PGTBL_PTE_READ_SHIFT;
+	pg->valid = (pte[index] & PGTBL_PTE_VALID_MASK) >>
+					PGTBL_PTE_VALID_SHIFT;
 
 	vmm_spin_unlock_irqrestore_lite(&pgtbl->tbl_lock, flags);
 
@@ -522,7 +516,7 @@ int cpu_mmu_unmap_page(struct cpu_pgtbl *pgtbl, struct cpu_page *pg)
 	int start_level;
 	int index, rc;
 	bool free_pgtbl;
-	u64 *pte;
+	cpu_pte_t *pte;
 	irq_flags_t flags;
 	struct cpu_pgtbl *child;
 	physical_size_t blksz;
@@ -554,7 +548,7 @@ int cpu_mmu_unmap_page(struct cpu_pgtbl *pgtbl, struct cpu_page *pg)
 	}
 
 	index = cpu_mmu_level_index(pg->ia, pgtbl->level);
-	pte = (u64 *)pgtbl->tbl_va;
+	pte = (cpu_pte_t *)pgtbl->tbl_va;
 
 	vmm_spin_lock_irqsave_lite(&pgtbl->tbl_lock, flags);
 
@@ -571,11 +565,12 @@ int cpu_mmu_unmap_page(struct cpu_pgtbl *pgtbl, struct cpu_page *pg)
 	pte[index] = 0x0;
 	cpu_mmu_sync_pte(&pte[index]);
 
-	if (pgtbl->stage == 2) {
-		cpu_invalid_ipa_guest_tlb((pg->ia));
+	if (pgtbl->stage == PGTBL_STAGE2) {
+		cpu_remote_gpa_guest_tlbflush(pg->ia, blksz);
 		start_level = mmuctrl.stage2_start_level;
 	} else {
-		cpu_invalid_va_hypervisor_tlb(((virtual_addr_t)pg->ia));
+		cpu_remote_va_hyp_tlb_flush((virtual_addr_t)pg->ia,
+					    (virtual_size_t)blksz);
 		start_level = mmuctrl.stage1_start_level;
 	}
 
@@ -597,7 +592,7 @@ int cpu_mmu_unmap_page(struct cpu_pgtbl *pgtbl, struct cpu_page *pg)
 int cpu_mmu_map_page(struct cpu_pgtbl *pgtbl, struct cpu_page *pg)
 {
 	int index;
-	u64 *pte;
+	cpu_pte_t *pte;
 	irq_flags_t flags;
 	struct cpu_pgtbl *child;
 	physical_size_t blksz;
@@ -623,7 +618,7 @@ int cpu_mmu_map_page(struct cpu_pgtbl *pgtbl, struct cpu_page *pg)
 	}
 
 	index = cpu_mmu_level_index(pg->ia, pgtbl->level);
-	pte = (u64 *)pgtbl->tbl_va;
+	pte = (cpu_pte_t *)pgtbl->tbl_va;
 
 	vmm_spin_lock_irqsave_lite(&pgtbl->tbl_lock, flags);
 
@@ -635,51 +630,32 @@ int cpu_mmu_map_page(struct cpu_pgtbl *pgtbl, struct cpu_page *pg)
 	pte[index] = pg->oa >> PGTBL_PAGE_SIZE_SHIFT;
 	pte[index] = pte[index] << PGTBL_PTE_ADDR_SHIFT;
 
-	if (pgtbl->stage == 2) {
-		/* TODO: */
-		pte[index] |= ((u64)pg->rsw << PGTBL_PTE_RSW_SHIFT) &
-						PGTBL_PTE_RSW_MASK;
-		pte[index] |= ((u64)pg->dirty << PGTBL_PTE_DIRTY_SHIFT) &
-						PGTBL_PTE_DIRTY_MASK;
-		pte[index] |= ((u64)pg->accessed << PGTBL_PTE_ACCESSED_SHIFT) &
-						PGTBL_PTE_ACCESSED_MASK;
-		pte[index] |= ((u64)pg->global << PGTBL_PTE_GLOBAL_SHIFT) &
-						PGTBL_PTE_GLOBAL_MASK;
-		pte[index] |= ((u64)pg->user << PGTBL_PTE_USER_SHIFT) &
-						PGTBL_PTE_USER_MASK;
-		pte[index] |= ((u64)pg->execute << PGTBL_PTE_EXECUTE_SHIFT) &
-						PGTBL_PTE_EXECUTE_MASK;
-		pte[index] |= ((u64)pg->write << PGTBL_PTE_WRITE_SHIFT) &
-						PGTBL_PTE_WRITE_MASK;
-		pte[index] |= ((u64)pg->read << PGTBL_PTE_READ_SHIFT) &
-						PGTBL_PTE_READ_MASK;
-	} else {
-		pte[index] |= ((u64)pg->rsw << PGTBL_PTE_RSW_SHIFT) &
-						PGTBL_PTE_RSW_MASK;
-		pte[index] |= ((u64)pg->dirty << PGTBL_PTE_DIRTY_SHIFT) &
-						PGTBL_PTE_DIRTY_MASK;
-		pte[index] |= ((u64)pg->accessed << PGTBL_PTE_ACCESSED_SHIFT) &
-						PGTBL_PTE_ACCESSED_MASK;
-		pte[index] |= ((u64)pg->global << PGTBL_PTE_GLOBAL_SHIFT) &
-						PGTBL_PTE_GLOBAL_MASK;
-		pte[index] |= ((u64)pg->user << PGTBL_PTE_USER_SHIFT) &
-						PGTBL_PTE_USER_MASK;
-		pte[index] |= ((u64)pg->execute << PGTBL_PTE_EXECUTE_SHIFT) &
-						PGTBL_PTE_EXECUTE_MASK;
-		pte[index] |= ((u64)pg->write << PGTBL_PTE_WRITE_SHIFT) &
-						PGTBL_PTE_WRITE_MASK;
-		pte[index] |= ((u64)pg->read << PGTBL_PTE_READ_SHIFT) &
-						PGTBL_PTE_READ_MASK;
-	}
+	pte[index] |= ((cpu_pte_t)pg->rsw << PGTBL_PTE_RSW_SHIFT) &
+					PGTBL_PTE_RSW_MASK;
+	pte[index] |= ((cpu_pte_t)pg->dirty << PGTBL_PTE_DIRTY_SHIFT) &
+					PGTBL_PTE_DIRTY_MASK;
+	pte[index] |= ((cpu_pte_t)pg->accessed << PGTBL_PTE_ACCESSED_SHIFT) &
+					PGTBL_PTE_ACCESSED_MASK;
+	pte[index] |= ((cpu_pte_t)pg->global << PGTBL_PTE_GLOBAL_SHIFT) &
+					PGTBL_PTE_GLOBAL_MASK;
+	pte[index] |= ((cpu_pte_t)pg->user << PGTBL_PTE_USER_SHIFT) &
+					PGTBL_PTE_USER_MASK;
+	pte[index] |= ((cpu_pte_t)pg->execute << PGTBL_PTE_EXECUTE_SHIFT) &
+					PGTBL_PTE_EXECUTE_MASK;
+	pte[index] |= ((cpu_pte_t)pg->write << PGTBL_PTE_WRITE_SHIFT) &
+					PGTBL_PTE_WRITE_MASK;
+	pte[index] |= ((cpu_pte_t)pg->read << PGTBL_PTE_READ_SHIFT) &
+					PGTBL_PTE_READ_MASK;
 
 	pte[index] |= PGTBL_PTE_VALID_MASK;
 
 	cpu_mmu_sync_pte(&pte[index]);
 
-	if (pgtbl->stage == 2) {
-		cpu_invalid_ipa_guest_tlb((pg->ia));
+	if (pgtbl->stage == PGTBL_STAGE2) {
+		cpu_remote_gpa_guest_tlbflush(pg->ia, blksz);
 	} else {
-		cpu_invalid_va_hypervisor_tlb(((virtual_addr_t)pg->ia));
+		cpu_remote_va_hyp_tlb_flush((virtual_addr_t)pg->ia,
+					    (virtual_size_t)blksz);
 	}
 
 	pgtbl->pte_cnt++;
@@ -704,6 +680,30 @@ int cpu_mmu_map_hypervisor_page(struct cpu_page *pg)
 	return cpu_mmu_map_page(mmuctrl.hyp_pgtbl, pg);
 }
 
+struct cpu_pgtbl *cpu_mmu_stage2_current_pgtbl(void)
+{
+	unsigned long pgtbl_ppn = csr_read(CSR_HGATP) & HGATP_PPN;
+	return cpu_mmu_pgtbl_find(pgtbl_ppn << PGTBL_PAGE_SIZE_SHIFT);
+}
+
+u32 cpu_mmu_stage2_current_vmid(void)
+{
+	return (csr_read(CSR_HGATP) & HGATP_VMID_MASK) >> HGATP_VMID_SHIFT;
+}
+
+int cpu_mmu_stage2_change_pgtbl(u32 vmid, struct cpu_pgtbl *pgtbl)
+{
+	unsigned long hgatp;
+
+	hgatp = HGATP_MODE;
+	hgatp |= ((unsigned long)vmid << HGATP_VMID_SHIFT) & HGATP_VMID_MASK;
+	hgatp |= (pgtbl->tbl_pa >> PGTBL_PAGE_SIZE_SHIFT) & HGATP_PPN;
+
+	csr_write(CSR_HGATP, hgatp);
+
+	return VMM_OK;
+}
+
 #define PHYS_RW_PTE							\
 	(PGTBL_PTE_VALID_MASK			|			\
 	 PGTBL_PTE_READ_MASK			|			\
@@ -713,9 +713,9 @@ int arch_cpu_aspace_memory_read(virtual_addr_t tmp_va,
 				physical_addr_t src,
 				void *dst, u32 len, bool cacheable)
 {
-	u64 old_pte_val;
+	cpu_pte_t old_pte_val;
 	u32 cpu = vmm_smp_processor_id();
-	u64 *pte = mmuctrl.mem_rw_pte[cpu];
+	cpu_pte_t *pte = mmuctrl.mem_rw_pte[cpu];
 	physical_addr_t outaddr_mask = mmuctrl.mem_rw_outaddr_mask[cpu];
 	virtual_addr_t offset = (src & ~outaddr_mask);
 
@@ -726,7 +726,7 @@ int arch_cpu_aspace_memory_read(virtual_addr_t tmp_va,
 	*pte |= PHYS_RW_PTE;
 
 	cpu_mmu_sync_pte(pte);
-	cpu_invalid_va_hypervisor_tlb(tmp_va);
+	__sfence_vma_va(tmp_va);
 
 	switch (len) {
 	case 1:
@@ -756,9 +756,9 @@ int arch_cpu_aspace_memory_write(virtual_addr_t tmp_va,
 				 physical_addr_t dst,
 				 void *src, u32 len, bool cacheable)
 {
-	u64 old_pte_val;
+	cpu_pte_t old_pte_val;
 	u32 cpu = vmm_smp_processor_id();
-	u64 *pte = mmuctrl.mem_rw_pte[cpu];
+	cpu_pte_t *pte = mmuctrl.mem_rw_pte[cpu];
 	physical_addr_t outaddr_mask = mmuctrl.mem_rw_outaddr_mask[cpu];
 	virtual_addr_t offset = (dst & ~outaddr_mask);
 
@@ -769,7 +769,7 @@ int arch_cpu_aspace_memory_write(virtual_addr_t tmp_va,
 	*pte |= PHYS_RW_PTE;
 
 	cpu_mmu_sync_pte(pte);
-	cpu_invalid_va_hypervisor_tlb(tmp_va);
+	__sfence_vma_va(tmp_va);
 
 	switch (len) {
 	case 1:
@@ -797,10 +797,11 @@ int arch_cpu_aspace_memory_write(virtual_addr_t tmp_va,
 
 static int __cpuinit cpu_mmu_find_pte(struct cpu_pgtbl *pgtbl,
 				      physical_addr_t ia,
-				      u64 **ptep, struct cpu_pgtbl **pgtblp)
+				      cpu_pte_t **ptep,
+				      struct cpu_pgtbl **pgtblp)
 {
 	int index;
-	u64 *pte;
+	cpu_pte_t *pte;
 	irq_flags_t flags;
 	struct cpu_pgtbl *child;
 
@@ -809,7 +810,7 @@ static int __cpuinit cpu_mmu_find_pte(struct cpu_pgtbl *pgtbl,
 	}
 
 	index = cpu_mmu_level_index(ia, pgtbl->level);
-	pte = (u64 *)pgtbl->tbl_va;
+	pte = (cpu_pte_t *)pgtbl->tbl_va;
 
 	vmm_spin_lock_irqsave_lite(&pgtbl->tbl_lock, flags);
 
@@ -854,7 +855,7 @@ int __cpuinit arch_cpu_aspace_memory_rwinit(virtual_addr_t tmp_va)
 	p.rsw = 0;
 	p.accessed = 0;
 	p.dirty = 0;
-	p.global = 0;
+	p.global = 1;
 	p.user = 0;
 	p.execute = 1;
 	p.write = 1;
@@ -903,7 +904,7 @@ int arch_cpu_aspace_map(virtual_addr_t page_va,
 	p.rsw = 0;
 	p.accessed = 0;
 	p.dirty = 0;
-	p.global = 0;
+	p.global = 1;
 	p.user = 0;
 	p.execute = (mem_flags & VMM_MEMORY_EXECUTABLE) ? 0 : 1;
 	p.write = (mem_flags & VMM_MEMORY_WRITEABLE) ? 1 : 0;
@@ -984,8 +985,13 @@ int __init arch_cpu_aspace_primary_init(physical_addr_t *core_resv_pa,
 	 * parameters to inform host aspace about the arch reserved space.
 	 */
 	memset(&mmuctrl, 0, sizeof(mmuctrl));
+#ifdef CONFIG_64BIT
 	mmuctrl.stage1_start_level = 2; /* Assume Sv39 */
 	mmuctrl.stage2_start_level = 2; /* Assume Sv39 */
+#else
+	mmuctrl.stage1_start_level = 1; /* Assume Sv32 */
+	mmuctrl.stage2_start_level = 1; /* Assume Sv32 */
+#endif
 	*arch_resv_va = (resv_va + resv_sz);
 	*arch_resv_pa = (resv_pa + resv_sz);
 	*arch_resv_sz = resv_sz;
@@ -1033,7 +1039,7 @@ int __init arch_cpu_aspace_primary_init(physical_addr_t *core_resv_pa,
 	memset(mmuctrl.hyp_pgtbl, 0, sizeof(struct cpu_pgtbl));
 	INIT_LIST_HEAD(&mmuctrl.hyp_pgtbl->head);
 	mmuctrl.hyp_pgtbl->parent = NULL;
-	mmuctrl.hyp_pgtbl->stage = 1;
+	mmuctrl.hyp_pgtbl->stage = PGTBL_STAGE1;
 	mmuctrl.hyp_pgtbl->level = mmuctrl.stage1_start_level;
 	mmuctrl.hyp_pgtbl->map_ia = 0x0;
 	mmuctrl.hyp_pgtbl->tbl_pa =  mmuctrl.ipgtbl_base_pa;
@@ -1044,7 +1050,8 @@ int __init arch_cpu_aspace_primary_init(physical_addr_t *core_resv_pa,
 	INIT_LIST_HEAD(&mmuctrl.hyp_pgtbl->child_list);
 	/* Scan table */
 	for (t = 0; t < PGTBL_TABLE_ENTCNT; t++) {
-		if (((u64 *)mmuctrl.hyp_pgtbl->tbl_va)[t] & PGTBL_PTE_VALID_MASK) {
+		if (((cpu_pte_t *)mmuctrl.hyp_pgtbl->tbl_va)[t] &
+						PGTBL_PTE_VALID_MASK) {
 			mmuctrl.hyp_pgtbl->pte_cnt++;
 		}
 	}
@@ -1065,15 +1072,16 @@ int __init arch_cpu_aspace_primary_init(physical_addr_t *core_resv_pa,
 		INIT_SPIN_LOCK(&pgtbl->tbl_lock);
 		pgtbl->tbl_va = mmuctrl.ipgtbl_base_va + i * PGTBL_TABLE_SIZE;
 		for (t = 0; t < PGTBL_TABLE_ENTCNT; t++) {
-			if (!(((u64 *)parent->tbl_va)[t] & PGTBL_PTE_VALID_MASK)) {
+			if (!(((cpu_pte_t *)parent->tbl_va)[t] &
+						PGTBL_PTE_VALID_MASK)) {
 				continue;
 			}
-			pa = (((u64 *)parent->tbl_va)[t] & PGTBL_PTE_ADDR_MASK)
-				>> PGTBL_PTE_ADDR_SHIFT;
+			pa = (((cpu_pte_t *)parent->tbl_va)[t] &
+				PGTBL_PTE_ADDR_MASK) >> PGTBL_PTE_ADDR_SHIFT;
 			pa = pa << PGTBL_PAGE_SIZE_SHIFT;
 			if (pa == pgtbl->tbl_pa) {
 				pgtbl->map_ia = parent->map_ia;
-				pgtbl->map_ia += ((u64)t) <<
+				pgtbl->map_ia += ((cpu_pte_t)t) <<
 				cpu_mmu_level_index_shift(parent->level);
 				break;
 			}
@@ -1082,7 +1090,8 @@ int __init arch_cpu_aspace_primary_init(physical_addr_t *core_resv_pa,
 		INIT_LIST_HEAD(&pgtbl->child_list);
 		/* Scan table enteries */
 		for (t = 0; t < PGTBL_TABLE_ENTCNT; t++) {
-			if (((u64 *)pgtbl->tbl_va)[t] & PGTBL_PTE_VALID_MASK) {
+			if (((cpu_pte_t *)pgtbl->tbl_va)[t] &
+						PGTBL_PTE_VALID_MASK) {
 				pgtbl->pte_cnt++;
 			}
 		}

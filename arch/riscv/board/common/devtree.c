@@ -6,12 +6,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -25,6 +25,8 @@
 #include <libs/stringlib.h>
 #include <libs/libfdt.h>
 #include <arch_devtree.h>
+#include <arch_sections.h>
+#include <cpu_init.h>
 
 /* Note: dt_blob_start is start of flattend device tree
  * that is linked directly with hypervisor binary
@@ -35,14 +37,18 @@ static u32 bank_nr;
 static physical_addr_t bank_data[CONFIG_MAX_RAM_BANK_COUNT*2];
 static physical_addr_t dt_bank_data[CONFIG_MAX_RAM_BANK_COUNT*2];
 
+static u32 load_bank_nr;
+static physical_addr_t load_bank_resv_pa;
+static physical_size_t load_bank_resv_sz;
+
 struct match_info {
 	struct fdt_fileinfo *fdt;
 	u32 address_cells;
 	u32 size_cells;
 };
 
-static int match_memory_node(struct fdt_node_header *fdt_node,
-			     int level, void *priv)
+static int __init match_memory_node(struct fdt_node_header *fdt_node,
+				    int level, void *priv)
 {
 	int rc;
 	char dev_type[16];
@@ -65,7 +71,7 @@ static int match_memory_node(struct fdt_node_header *fdt_node,
 	return 0;
 }
 
-int arch_devtree_ram_bank_setup(void)
+int __init arch_devtree_ram_bank_setup(void)
 {
 	int rc = VMM_OK;
 	physical_addr_t tmp;
@@ -153,7 +159,7 @@ int arch_devtree_ram_bank_setup(void)
 			break;
 		}
 	}
-	if (bank_nr < 2) {
+	if (!bank_nr) {
 		return VMM_OK;
 	}
 
@@ -171,17 +177,38 @@ int arch_devtree_ram_bank_setup(void)
 		}
 	}
 
+	/*
+	 * For quite a few RISC-V systems, the RUNTIME M-mode firmware
+	 * is located at start of a RAM bank. Unfortunately in most cases,
+	 * the DTB passed to Xvisor (or Linux) does not have memreserve
+	 * entry for the RUNTIME M-mode firmware. To be safe, we reserve
+	 * RAM from start of the RAM bank to location where Xvisor is
+	 * loaded in the RAM bank.
+	 */
+	load_bank_nr = 0;
+	load_bank_resv_pa = 0;
+	load_bank_resv_sz = 0;
+	for (i = 0; i < bank_nr; i++) {
+		if (bank_data[2*i] <= arch_code_paddr_start() &&
+		    arch_code_paddr_start() < (bank_data[2*i] + bank_data[2*i + 1])) {
+			load_bank_nr = i;
+			load_bank_resv_pa = bank_data[2*i];
+			load_bank_resv_sz = arch_code_paddr_start() - bank_data[2*i];
+			break;
+		}
+	}
+
 	return VMM_OK;
 }
 
-int arch_devtree_ram_bank_count(u32 *bank_count)
+int __init arch_devtree_ram_bank_count(u32 *bank_count)
 {
 	*bank_count = bank_nr;
 
 	return VMM_OK;
 }
 
-int arch_devtree_ram_bank_start(u32 bank, physical_addr_t *addr)
+int __init arch_devtree_ram_bank_start(u32 bank, physical_addr_t *addr)
 {
 	if (bank >= bank_nr) {
 		return VMM_EINVALID;
@@ -192,7 +219,7 @@ int arch_devtree_ram_bank_start(u32 bank, physical_addr_t *addr)
 	return VMM_OK;
 }
 
-int arch_devtree_ram_bank_size(u32 bank, physical_size_t *size)
+int __init arch_devtree_ram_bank_size(u32 bank, physical_size_t *size)
 {
 	if (bank >= bank_nr) {
 		return VMM_EINVALID;
@@ -215,14 +242,27 @@ int arch_devtree_reserve_count(u32 *count)
 
 	*count = libfdt_reserve_count(&fdt);
 
+	if (load_bank_resv_sz) {
+		*count += 1;
+	}
+
 	return VMM_OK;
 }
 
-int arch_devtree_reserve_addr(u32 index, physical_addr_t *addr)
+int __init arch_devtree_reserve_addr(u32 index, physical_addr_t *addr)
 {
 	u64 tmp;
 	int rc = VMM_OK;
 	struct fdt_fileinfo fdt;
+
+	if (load_bank_resv_sz) {
+		if (index == 0) {
+			*addr = load_bank_resv_pa;
+			return VMM_OK;
+		} else {
+			index -= 1;
+		}
+	}
 
 	rc = libfdt_parse_fileinfo((virtual_addr_t)&dt_blob_start, &fdt);
 	if (rc) {
@@ -239,11 +279,20 @@ int arch_devtree_reserve_addr(u32 index, physical_addr_t *addr)
 	return VMM_OK;
 }
 
-int arch_devtree_reserve_size(u32 index, physical_size_t *size)
+int __init arch_devtree_reserve_size(u32 index, physical_size_t *size)
 {
 	u64 tmp;
 	int rc = VMM_OK;
 	struct fdt_fileinfo fdt;
+
+	if (load_bank_resv_sz) {
+		if (index == 0) {
+			*size = load_bank_resv_sz;
+			return VMM_OK;
+		} else {
+			index -= 1;
+		}
+	}
 
 	rc = libfdt_parse_fileinfo((virtual_addr_t)&dt_blob_start, &fdt);
 	if (rc) {
@@ -260,15 +309,20 @@ int arch_devtree_reserve_size(u32 index, physical_size_t *size)
 	return VMM_OK;
 }
 
-int arch_devtree_populate(struct vmm_devtree_node **root)
+int __init arch_devtree_populate(struct vmm_devtree_node **root)
 {
 	int rc = VMM_OK;
 	struct fdt_fileinfo fdt;
-	
+
 	rc = libfdt_parse_fileinfo((virtual_addr_t)&dt_blob_start, &fdt);
 	if (rc) {
 		return rc;
 	}
 
-	return libfdt_parse_devtree(&fdt, root, "\0", NULL);
+	rc = libfdt_parse_devtree(&fdt, root, "\0", NULL);
+	if (rc) {
+		return rc;
+	}
+
+	return cpu_parse_devtree_hwcap();
 }
